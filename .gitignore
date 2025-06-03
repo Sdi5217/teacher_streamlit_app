@@ -1,0 +1,21 @@
+# Python specific ignores
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+env/
+venv/
+*.egg-info/
+.mypy_cache/
+
+# Database files
+*.db
+*.sqlite3
+*.sqlite
+teacher_management.db  # ระบุชื่อไฟล์ฐานข้อมูลของคุณโดยตรง
+
+# Uploaded photos (do NOT upload user-uploaded content to GitHub)
+teacher_photos/
+
+# Streamlit specific
+.streamlit/
