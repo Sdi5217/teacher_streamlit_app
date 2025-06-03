@@ -23,9 +23,15 @@ def get_db_connection():
     return conn
 
 def setup_database():
+    """
+    ตั้งค่าตาราง 'teachers' ในฐานข้อมูลหากยังไม่มี
+    และสร้างโฟลเดอร์สำหรับเก็บรูปภาพ
+    รวมถึงเพิ่มคอลัมน์ 'position' หากยังไม่มี
+    """
     conn = get_db_connection()
     
     if hasattr(conn, 'session'):
+        # สำหรับ st.connection
         with conn.session as s:
             s.execute('''
                 CREATE TABLE IF NOT EXISTS teachers (
@@ -35,11 +41,22 @@ def setup_database():
                     major_subject TEXT,
                     teaching_subjects TEXT,
                     contact_number TEXT,
-                    photo_path TEXT
+                    photo_path TEXT,
+                    position TEXT  -- เพิ่มคอลัมน์ position ที่นี่
                 )
             ''')
             s.commit()
+            
+            # ตรวจสอบและเพิ่มคอลัมน์ position หากตารางมีอยู่แล้วแต่ไม่มีคอลัมน์นี้
+            # นี่คือวิธีที่ปลอดภัยกว่าการลบและสร้างตารางใหม่
+            cursor = s.connection.cursor() # เข้าถึง sqlite3 cursor จาก st.connection
+            cursor.execute("PRAGMA table_info(teachers)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'position' not in columns:
+                s.execute("ALTER TABLE teachers ADD COLUMN position TEXT")
+                s.commit()
     else:
+        # สำหรับ sqlite3 โดยตรง
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS teachers (
@@ -49,11 +66,20 @@ def setup_database():
                 major_subject TEXT,
                 teaching_subjects TEXT,
                 contact_number TEXT,
-                photo_path TEXT
+                photo_path TEXT,
+                position TEXT  -- เพิ่มคอลัมน์ position ที่นี่
             )
         ''')
         conn.commit()
+        
+        # ตรวจสอบและเพิ่มคอลัมน์ position หากตารางมีอยู่แล้วแต่ไม่มีคอลัมน์นี้
+        cursor.execute("PRAGMA table_info(teachers)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'position' not in columns:
+            cursor.execute("ALTER TABLE teachers ADD COLUMN position TEXT")
+            conn.commit()
         conn.close()
+    
     if not os.path.exists(UPLOAD_FOLDER):
         os.makedirs(UPLOAD_FOLDER)
 
@@ -75,7 +101,8 @@ def export_teachers_to_excel():
         df = conn.query('SELECT * FROM teachers', ttl=0)
     else:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_path FROM teachers")
+        # ตรวจสอบให้แน่ใจว่าเลือกคอลัมน์ 'position' ด้วย
+        cursor.execute("SELECT id, full_name, school_affiliation, position, major_subject, teaching_subjects, contact_number, photo_path FROM teachers")
         data = cursor.fetchall()
         column_names = [description[0] for description in cursor.description]
         conn.close()
@@ -85,6 +112,7 @@ def export_teachers_to_excel():
         'id': 'รหัสครู',
         'full_name': 'ชื่อ-สกุล',
         'school_affiliation': 'สังกัดโรงเรียน',
+        'position': 'ตำแหน่ง', # เพิ่มชื่อคอลัมน์ตำแหน่ง
         'major_subject': 'วิชาเอก',
         'teaching_subjects': 'สอนรายวิชา',
         'contact_number': 'เบอร์ติดต่อ',
@@ -114,7 +142,8 @@ def get_teacher_by_id_from_db(teacher_id):
         conn.close()
         return dict(teacher) if teacher else None
 
-def add_teacher_to_db(full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_file=None):
+# อัปเดตฟังก์ชันเพิ่มข้อมูลครู
+def add_teacher_to_db(full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_file=None, position=None):
     conn = get_db_connection()
     saved_photo_path = None
     if photo_file:
@@ -134,29 +163,31 @@ def add_teacher_to_db(full_name, school_affiliation, major_subject, teaching_sub
     if hasattr(conn, 'session'):
         with conn.session as s:
             s.execute('''
-                INSERT INTO teachers (full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_path)
-                VALUES (:full_name, :school_affiliation, :major_subject, :teaching_subjects, :contact_number, :photo_path)
+                INSERT INTO teachers (full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_path, position)
+                VALUES (:full_name, :school_affiliation, :major_subject, :teaching_subjects, :contact_number, :photo_path, :position)
             ''', params=dict(
                 full_name=full_name,
                 school_affiliation=school_affiliation,
                 major_subject=major_subject,
                 teaching_subjects=teaching_subjects,
                 contact_number=contact_number,
-                photo_path=saved_photo_path
+                photo_path=saved_photo_path,
+                position=position # เพิ่มตำแหน่ง
             ))
             s.commit()
     else:
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO teachers (full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_path)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (full_name, school_affiliation, major_subject, teaching_subjects, contact_number, saved_photo_path))
+            INSERT INTO teachers (full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_path, position)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (full_name, school_affiliation, major_subject, teaching_subjects, contact_number, saved_photo_path, position)) # เพิ่มตำแหน่ง
         conn.commit()
         conn.close()
     st.cache_data.clear()
     st.success(f"เพิ่มข้อมูลครู '{full_name}' สำเร็จ!")
 
-def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_file=None):
+# อัปเดตฟังก์ชันแก้ไขข้อมูลครู
+def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_file=None, position=None):
     conn = get_db_connection()
     current_teacher = get_teacher_by_id_from_db(teacher_id)
 
@@ -182,6 +213,10 @@ def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subjec
     if contact_number is not None and contact_number != current_teacher['contact_number']:
         updates.append("contact_number = :contact_number")
         params['contact_number'] = contact_number
+    # เพิ่มการอัปเดตตำแหน่ง
+    if position is not None and position != current_teacher.get('position', ''): # ใช้ .get เผื่อข้อมูลเก่าไม่มีตำแหน่ง
+        updates.append("position = :position")
+        params['position'] = position
     
     if photo_file:
         if current_teacher and current_teacher['photo_path']:
@@ -354,7 +389,6 @@ if 'search_query_school' not in st.session_state:
 setup_database()
 
 # --- ส่วนหัว: ชื่อระบบและโลโก้ ---
-# ใช้ st.container เพื่อจัดกลุ่มองค์ประกอบ
 header_container = st.container()
 with header_container:
     col_text, col_logo = st.columns([5, 1])
@@ -371,7 +405,7 @@ with header_container:
         else:
             st.warning(f"ไม่พบไฟล์โลโก้ที่: {logo_path}")
 
-st.markdown("---") # เส้นคั่นแนวนอน
+st.markdown("---") 
 
 # --- Navigation Buttons and Export ---
 nav_container = st.container()
@@ -410,7 +444,6 @@ with content_container:
         st.header("รายการข้อมูลครู")
 
         # --- ส่วนค้นหา ---
-        # ใช้ expander เพื่อเก็บส่วนค้นหา ทำให้หน้าดูสะอาดขึ้น
         with st.expander("🔎 ค้นหาข้อมูลครู", expanded=False):
             search_col_input, search_col_button = st.columns([3, 1])
             with search_col_input:
@@ -421,11 +454,10 @@ with content_container:
                     placeholder="เช่น บ้านด่านเหนือ"
                 )
             with search_col_button:
-                st.write("") # เว้นบรรทัดเพื่อให้ปุ่มอยู่ตรงกลางแนวตั้ง
+                st.write("") 
                 if st.button("ค้นหา", key="search_button", use_container_width=True):
                     st.session_state.search_query_school = search_term
         
-        # เพิ่มระยะห่างหลัง expander
         st.markdown("<br>", unsafe_allow_html=True) 
 
         teachers = get_all_teachers_from_db_cached()
@@ -443,12 +475,12 @@ with content_container:
 
         if teachers_to_display:
             for teacher in teachers_to_display: 
-                # ใช้ st.container เพื่อจัดกลุ่มข้อมูลครูแต่ละคน
-                teacher_card = st.container(border=True) # เพิ่ม border เพื่อให้ดูเป็น card
+                teacher_card = st.container(border=True) 
                 with teacher_card:
                     col_left, col_right = st.columns([2, 1])
                     with col_left:
                         st.markdown(f"### {teacher['full_name']} (ID: {teacher['id']})")
+                        st.markdown(f"**ตำแหน่ง:** {teacher.get('position', '-') or '-'}") # แสดงตำแหน่ง
                         st.markdown(f"**สังกัดโรงเรียน:** {teacher['school_affiliation'] or '-'}")
                         st.markdown(f"**วิชาเอก:** {teacher['major_subject'] or '-'}")
                         st.markdown(f"**สอนรายวิชา:** {teacher['teaching_subjects'] or '-'}")
@@ -463,7 +495,7 @@ with content_container:
                         else:
                             st.info("ไม่มีรูปภาพ")
                         
-                        st.markdown("<br>", unsafe_allow_html=True) # เพิ่มระยะห่าง
+                        st.markdown("<br>", unsafe_allow_html=True) 
                         edit_button = st.button(f"✏️ แก้ไข", key=f"edit_teacher_{teacher['id']}", use_container_width=True)
                         delete_button = st.button(f"🗑️ ลบ", key=f"delete_teacher_{teacher['id']}", use_container_width=True)
                         
@@ -474,7 +506,7 @@ with content_container:
                         
                         if delete_button:
                             if st.session_state.get(f'confirm_delete_{teacher["id"]}', False):
-                                if st.button("ยืนยันการลบ", key=f"confirm_delete_final_{teacher['id']}", type="primary", use_container_width=True): # ปุ่มยืนยันสีเขียว
+                                if st.button("ยืนยันการลบ", key=f"confirm_delete_final_{teacher['id']}", type="primary", use_container_width=True):
                                     if delete_teacher_from_db(teacher['id']):
                                         st.session_state.current_view = 'list'
                                     del st.session_state[f'confirm_delete_{teacher["id"]}']
@@ -482,7 +514,7 @@ with content_container:
                             else:
                                 st.session_state[f'confirm_delete_{teacher["id"]}'] = True
                                 st.warning(f"คลิก 'ยืนยันการลบ' เพื่อลบ '{teacher['full_name']}'")
-                st.markdown("<br>", unsafe_allow_html=True) # เพิ่มระยะห่างระหว่าง card
+                st.markdown("<br>", unsafe_allow_html=True) 
 
         else:
             st.info("ไม่พบข้อมูลครูในระบบ หรือไม่พบผลการค้นหา")
@@ -491,16 +523,17 @@ with content_container:
         st.header("เพิ่มข้อมูลครูใหม่")
         with st.form("add_teacher_form", clear_on_submit=True):
             full_name = st.text_input("ชื่อ-สกุล:", key="add_full_name")
+            position = st.text_input("ตำแหน่ง:", key="add_position", placeholder="เช่น ครูผู้ช่วย, ครูชำนาญการ") # เพิ่มช่องตำแหน่ง
             school_affiliation = st.text_input("สังกัดโรงเรียน:", key="add_school_affiliation")
             major_subject = st.text_input("วิชาเอก:", key="add_major_subject")
             teaching_subjects = st.text_input("สอนรายวิชา (คั่นด้วยคอมม่า):", key="add_teaching_subjects")
             contact_number = st.text_input("เบอร์ติดต่อ:", key="add_contact_number")
             photo_file = st.file_uploader("รูปถ่ายใบหน้า:", type=["png", "jpg", "jpeg"], key="add_photo_uploader")
 
-            submitted = st.form_submit_button("💾 บันทึกข้อมูลครู", type="primary") # ปุ่มหลักสีเขียว
+            submitted = st.form_submit_button("💾 บันทึกข้อมูลครู", type="primary")
             if submitted:
                 if full_name:
-                    add_teacher_to_db(full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_file)
+                    add_teacher_to_db(full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_file, position) # ส่งค่าตำแหน่ง
                     st.session_state.current_view = 'list'
                     st.rerun()
                 else:
@@ -514,6 +547,7 @@ with content_container:
                 st.header(f"แก้ไขข้อมูลครู: {teacher_data['full_name']}")
                 with st.form("edit_teacher_form"):
                     new_full_name = st.text_input("ชื่อ-สกุล:", value=teacher_data['full_name'] or "", key="edit_full_name")
+                    new_position = st.text_input("ตำแหน่ง:", value=teacher_data.get('position', '') or "", key="edit_position") # แสดงค่าตำแหน่งเดิม
                     new_school_affiliation = st.text_input("สังกัดโรงเรียน:", value=teacher_data['school_affiliation'] or "", key="edit_school_affiliation")
                     new_major_subject = st.text_input("วิชาเอก:", value=teacher_data['major_subject'] or "", key="edit_major_subject")
                     new_teaching_subjects = st.text_input("สอนรายวิชา (คั่นด้วยคอมม่า):", value=teacher_data['teaching_subjects'] or "", key="edit_teaching_subjects")
@@ -533,7 +567,7 @@ with content_container:
                     clear_photo = st.checkbox("ลบรูปภาพปัจจุบัน", value=st.session_state.get('photo_cleared', False), key="clear_current_photo")
                     st.session_state.photo_cleared = clear_photo
 
-                    submitted = st.form_submit_button("📝 บันทึกการแก้ไข", type="primary") # ปุ่มหลักสีเขียว
+                    submitted = st.form_submit_button("📝 บันทึกการแก้ไข", type="primary")
                     if submitted:
                         if not new_full_name:
                             st.error("ชื่อ-สกุล ต้องไม่ว่างเปล่า!")
@@ -549,7 +583,8 @@ with content_container:
                                 new_major_subject,
                                 new_teaching_subjects,
                                 new_contact_number,
-                                photo_to_save
+                                photo_to_save,
+                                new_position # ส่งค่าตำแหน่ง
                             ):
                                 st.session_state.current_view = 'list'
                                 st.session_state.edit_teacher_id = None
