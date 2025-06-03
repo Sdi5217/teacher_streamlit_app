@@ -18,8 +18,6 @@ def get_db_connection():
     พยายามใช้ st.connection ถ้ามี, ไม่เช่นนั้นจะ fallback ไปใช้ sqlite3 โดยตรง.
     """
     try:
-        # ตรวจสอบว่า Streamlit กำลังทำงานในโหมดที่รองรับ st.connection (เช่นบน Streamlit Community Cloud)
-        # และมีการตั้งค่าการเชื่อมต่อ teacher_db ใน secrets
         if "connections" in st.secrets and "teacher_db" in st.secrets["connections"]:
             return st.connection('teacher_db', type='sql')
     except Exception:
@@ -56,8 +54,7 @@ def setup_database():
             s.commit()
             
             # ตรวจสอบและเพิ่มคอลัมน์ 'position' หากยังไม่มี (เพื่อรองรับฐานข้อมูลเก่า)
-            # ต้องเข้าถึง cursor จากการเชื่อมต่อของ session
-            cursor = s.connection.cursor() 
+            cursor = s.connection.cursor() # เข้าถึง sqlite3 cursor จาก st.connection
             cursor.execute("PRAGMA table_info(teachers)")
             columns = [col[1] for col in cursor.fetchall()]
             if 'position' not in columns:
@@ -158,8 +155,7 @@ def get_teacher_by_id_from_db(teacher_id):
     if hasattr(conn, 'session'):
         # สำหรับ st.connection
         try:
-            # ใช้ params เพื่อความปลอดภัยและหลีกเลี่ยง SQL Injection
-            teacher = conn.query('SELECT * FROM teachers WHERE id = :id', params={'id': teacher_id}, ttl=0).iloc[0].to_dict()
+            teacher = conn.query(f'SELECT * FROM teachers WHERE id = {teacher_id}', ttl=0).iloc[0].to_dict()
             return teacher
         except IndexError:
             return None # ไม่พบข้อมูล
@@ -231,37 +227,31 @@ def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subjec
         return False
 
     updates = []
-    params_sqlite = [] # ใช้สำหรับ sqlite3 โดยตรง (positional parameters)
-    params_st_conn = {} # ใช้สำหรับ st.connection (named parameters)
+    # ใช้ List สำหรับเก็บค่าพารามิเตอร์แบบ Positional สำหรับ sqlite3 โดยตรง
+    params = [] 
 
     # ตรวจสอบว่ามีการเปลี่ยนแปลงข้อมูลในแต่ละฟิลด์หรือไม่
     if full_name is not None and full_name != current_teacher['full_name']:
         updates.append("full_name = ?")
-        params_sqlite.append(full_name)
-        params_st_conn['full_name'] = full_name
+        params.append(full_name)
     if school_affiliation is not None and school_affiliation != current_teacher['school_affiliation']:
         updates.append("school_affiliation = ?")
-        params_sqlite.append(school_affiliation)
-        params_st_conn['school_affiliation'] = school_affiliation
+        params.append(school_affiliation)
     if major_subject is not None and major_subject != current_teacher['major_subject']:
         updates.append("major_subject = ?")
-        params_sqlite.append(major_subject)
-        params_st_conn['major_subject'] = major_subject
+        params.append(major_subject)
     if teaching_subjects is not None and teaching_subjects != current_teacher['teaching_subjects']:
         updates.append("teaching_subjects = ?")
-        params_sqlite.append(teaching_subjects)
-        params_st_conn['teaching_subjects'] = teaching_subjects
+        params.append(teaching_subjects)
     if contact_number is not None and contact_number != current_teacher['contact_number']:
         updates.append("contact_number = ?")
-        params_sqlite.append(contact_number)
-        params_st_conn['contact_number'] = contact_number
+        params.append(contact_number)
     # เพิ่มการอัปเดตตำแหน่ง
     if position is not None and position != current_teacher.get('position', ''): 
         updates.append("position = ?")
-        params_sqlite.append(position)
-        params_st_conn['position'] = position
+        params.append(position)
     
-    saved_photo_path = None 
+    saved_photo_path = None # กำหนดค่าเริ่มต้นสำหรับ saved_photo_path
     if photo_file:
         # ถ้ามีไฟล์รูปภาพใหม่ถูกอัปโหลด
         if current_teacher and current_teacher['photo_path']:
@@ -282,8 +272,7 @@ def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subjec
                 f.write(photo_file.getbuffer())
             saved_photo_path = new_filename
             updates.append("photo_path = ?")
-            params_sqlite.append(saved_photo_path)
-            params_st_conn['photo_path'] = saved_photo_path
+            params.append(saved_photo_path)
             st.toast(f"บันทึกรูปภาพใหม่: {saved_photo_path_full}", icon="📸")
         except Exception as e:
             st.error(f"เกิดข้อผิดพลาดในการบันทึกรูปภาพใหม่: {e}")
@@ -299,32 +288,68 @@ def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subjec
                 except Exception as e:
                     st.warning(f"เกิดข้อผิดพลาดในการลบรูปภาพ (ตามคำสั่ง): {e}")
         updates.append("photo_path = ?")
-        params_sqlite.append(None) # ตั้งค่า photo_path เป็น NULL ในฐานข้อมูล
-        params_st_conn['photo_path'] = None
+        params.append(None) # ตั้งค่า photo_path เป็น NULL ในฐานข้อมูล
 
     if not updates:
         st.info("ไม่มีข้อมูลที่เปลี่ยนแปลง")
         return False
 
-    params_sqlite.append(teacher_id) # เพิ่ม ID ของครูเป็นพารามิเตอร์สุดท้ายสำหรับ WHERE clause
-    params_st_conn['id'] = teacher_id
+    params.append(teacher_id) # เพิ่ม ID ของครูเป็นพารามิเตอร์สุดท้ายสำหรับ WHERE clause
+    # สร้างคำสั่ง SQL สำหรับ UPDATE โดยใช้ Positional Parameters (?)
+    query = f"UPDATE teachers SET {', '.join(updates)} WHERE id = ?"
     
     if hasattr(conn, 'session'):
         # สำหรับ st.connection (ใช้ Named Parameters)
+        named_params = {}
+        # คัดลอกค่าจาก params list ไปยัง named_params dictionary
+        # ตรวจสอบและเพิ่มเฉพาะคอลัมน์ที่มีการเปลี่ยนแปลง
+        if full_name is not None and full_name != current_teacher['full_name']:
+            named_params['full_name'] = full_name
+        if school_affiliation is not None and school_affiliation != current_teacher['school_affiliation']:
+            named_params['school_affiliation'] = school_affiliation
+        if major_subject is not None and major_subject != current_teacher['major_subject']:
+            named_params['major_subject'] = major_subject
+        if teaching_subjects is not None and teaching_subjects != current_teacher['teaching_subjects']:
+            named_params['teaching_subjects'] = teaching_subjects
+        if contact_number is not None and contact_number != current_teacher['contact_number']:
+            named_params['contact_number'] = contact_number
+        if position is not None and position != current_teacher.get('position', ''):
+            named_params['position'] = position
+
+        # จัดการ photo_path สำหรับ named_params
+        if photo_file:
+            # ต้องสร้าง saved_photo_path อีกครั้งเพื่อให้ named_params มีค่าที่ถูกต้อง
+            try:
+                extension = os.path.splitext(photo_file.name)[1]
+                new_filename = f"{os.path.splitext(photo_file.name)[0]}_{os.urandom(8).hex()}{extension}"
+                saved_photo_path_full = os.path.join(UPLOAD_FOLDER, new_filename)
+                with open(saved_photo_path_full, "wb") as f:
+                    f.write(photo_file.getbuffer())
+                saved_photo_path = new_filename
+                named_params['photo_path'] = saved_photo_path
+            except Exception as e:
+                st.error(f"เกิดข้อผิดพลาดในการบันทึกรูปภาพใหม่: {e}")
+                named_params['photo_path'] = None 
+        elif st.session_state.get('photo_cleared', False):
+            named_params['photo_path'] = None
+
+        named_params['id'] = teacher_id
+        
+        # สร้าง query string ที่มี named parameters สำหรับ st.connection
+        # เฉพาะคอลัมน์ที่อยู่ใน named_params (ยกเว้น 'id')
         named_updates_clause = []
-        for key in params_st_conn.keys():
+        for key in named_params.keys():
             if key != 'id': 
                 named_updates_clause.append(f"{key} = :{key}")
         named_query = f"UPDATE teachers SET {', '.join(named_updates_clause)} WHERE id = :id"
 
         with conn.session as s:
-            s.execute(named_query, params=params_st_conn)
+            s.execute(named_query, params=named_params)
             s.commit()
     else:
         # สำหรับ sqlite3 โดยตรง (ใช้ Positional Parameters)
         cursor = conn.cursor()
-        query = f"UPDATE teachers SET {', '.join(updates)} WHERE id = ?" # สร้างคำสั่ง SQL ที่ใช้ ?
-        cursor.execute(query, tuple(params_sqlite)) # ส่ง List ของพารามิเตอร์เป็น Tuple
+        cursor.execute(query, tuple(params)) # ส่ง List ของพารามิเตอร์เป็น Tuple
         conn.commit()
         conn.close()
     st.cache_data.clear()
@@ -376,7 +401,7 @@ st.set_page_config(
     page_icon="🏫"  
 )
 
-# เพิ่ม CSS สำหรับสไตล์ Minimal
+# เพิ่ม CSS สำหรับสไตล์ Minimal และธีมสีฟ้าพาสเทล
 st.markdown("""
 <style>
     /* ซ่อนเมนูเบอร์เกอร์และปุ่ม Deploy */
@@ -384,59 +409,128 @@ st.markdown("""
     footer {visibility: hidden;}
     header {visibility: hidden;}
     
+    /* สีพื้นหลังของแอปโดยรวม */
+    .stApp {
+        background-color: #E0F7FA; /* Light Cyan - Pastel Blue */
+    }
+
     /* ปรับขนาดฟอนต์ของหัวข้อหลัก */
     h1, h2, h3, h4, h5, h6 {
-        color: #333; /* สีเข้มขึ้น */
+        color: #00796B; /* Teal - สีเขียวอมฟ้าเข้ม */
         font-family: 'Sarabun', sans-serif; /* ลองใช้ฟอนต์ที่สะอาดตา */
     }
     
     /* ปรับปุ่มให้ดู Minimal ขึ้น */
     .stButton > button {
         border-radius: 8px;
-        border: 1px solid #e0e0e0;
-        background-color: #f5f5f5;
-        color: #333;
+        border: 1px solid #B2EBF2; /* Light Blue 100 - สีอ่อนของฟ้า */
+        background-color: #E0F2F7; /* Light Blue 50 - สีอ่อนมากของฟ้า */
+        color: #00796B; /* Teal */
         padding: 8px 15px;
         font-size: 14px;
         transition: all 0.2s ease-in-out;
     }
     .stButton > button:hover {
-        background-color: #e0e0e0;
-        border-color: #ccc;
+        background-color: #B2EBF2; /* Light Blue 100 */
+        border-color: #80DEEA; /* Cyan 200 */
+        color: #004D40; /* Dark Teal */
     }
 
     /* ปุ่มหลัก (primary button) */
     .stButton > button.primary {
-        background-color: #4CAF50; /* เขียว */
+        background-color: #00BCD4; /* Cyan - สีฟ้าสดใส */
         color: white;
         border: none;
     }
     .stButton > button.primary:hover {
-        background-color: #45a049; /* เขียวเข้มขึ้นเมื่อ hover */
+        background-color: #00ACC1; /* Darker Cyan */
     }
 
     /* สไตล์สำหรับ input fields */
-    .stTextInput > div > div > input {
+    .stTextInput > div > div > input,
+    .stSelectbox > div > div > div,
+    .stFileUploader > div > div {
         border-radius: 8px;
-        border: 1px solid #ccc;
+        border: 1px solid #80DEEA; /* Cyan 200 */
         padding: 8px 12px;
+        background-color: white;
     }
 
     /* สไตล์สำหรับ expander */
     .streamlit-expanderHeader {
-        background-color: #f0f2f6; /* สีพื้นหลังของ header */
+        background-color: #BBDEFB; /* Light Blue 200 - สีฟ้าอ่อน */
         border-radius: 8px;
         padding: 10px;
         font-weight: bold;
+        color: #01579B; /* Light Blue 800 - สีน้ำเงินเข้ม */
     }
     .streamlit-expanderContent {
-        border: 1px solid #e0e0e0;
+        border: 1px solid #80DEEA; /* Cyan 200 */
         border-top: none;
         border-bottom-left-radius: 8px;
         border-bottom-right-radius: 8px;
         padding: 15px;
         background-color: #ffffff;
     }
+
+    /* สไตล์สำหรับ Teacher Card */
+    div[data-testid="stVerticalBlock"] > div[data-testid="stHorizontalBlock"] {
+        background-color: #F1F8E9; /* Light Green 50 - สีเขียวอ่อนมาก */
+        border-radius: 12px;
+        padding: 20px;
+        box-shadow: 2px 2px 8px rgba(0,0,0,0.1);
+        margin-bottom: 20px;
+    }
+
+    /* ปุ่มแก้ไขและลบขนาดเล็กทางขวา */
+    .small-button {
+        padding: 4px 8px !important; /* ลดขนาด padding */
+        font-size: 12px !important; /* ลดขนาด font */
+        border-radius: 5px !important;
+        margin-left: 5px; /* ระยะห่างระหว่างปุ่ม */
+        display: inline-flex; /* ให้อยู่ในบรรทัดเดียวกัน */
+        align-items: center;
+        justify-content: center;
+        height: 30px; /* กำหนดความสูงเพื่อให้ปุ่มเท่ากัน */
+    }
+    .small-button.edit-btn {
+        background-color: #FFC107; /* Amber - สำหรับแก้ไข */
+        color: white;
+        border: none;
+    }
+    .small-button.edit-btn:hover {
+        background-color: #FFA000; /* Darker Amber */
+    }
+    .small-button.delete-btn {
+        background-color: #F44336; /* Red - สำหรับลบ */
+        color: white;
+        border: none;
+    }
+    .small-button.delete-btn:hover {
+        background-color: #D32F2F; /* Darker Red */
+    }
+    .small-button.confirm-delete-btn { /* ปุ่มยืนยันการลบ */
+        background-color: #E53935; /* Red 600 */
+        color: white;
+        border: none;
+    }
+    .small-button.confirm-delete-btn:hover {
+        background-color: #C62828; /* Red 800 */
+    }
+    .small-button.cancel-btn { /* ปุ่มยกเลิกการลบ */
+        background-color: #B0BEC5; /* Blue Grey 200 */
+        color: #424242;
+        border: none;
+    }
+    .small-button.cancel-btn:hover {
+        background-color: #90A4AE; /* Blue Grey 300 */
+    }
+
+    /* จัดปุ่มใน Card ให้อยู่ชิดขวา */
+    .stExpander > div > div > div > div {
+        text-align: right;
+    }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -547,56 +641,86 @@ with content_container:
             for teacher in teachers_to_display:   
                 teacher_card = st.container(border=True)  # สร้าง Card พร้อมเส้นขอบ
                 with teacher_card:
-                    col_left, col_right = st.columns([2, 1]) # แบ่ง 2 คอลัมน์ภายใน Card
-                    with col_left:
+                    col_info, col_photo, col_buttons = st.columns([4, 1.5, 1]) # แบ่ง 3 คอลัมน์ภายใน Card
+                    
+                    with col_info:
                         st.markdown(f"### {teacher['full_name']} (ID: {teacher['id']})")
-                        st.markdown(f"**ตำแหน่ง:** {teacher.get('position', '-') or '-'}") # แสดงตำแหน่ง (ใช้ .get เพื่อป้องกัน KeyError ในข้อมูลเก่าที่อาจไม่มีคอลัมน์นี้)
+                        st.markdown(f"**ตำแหน่ง:** {teacher.get('position', '-') or '-'}")
                         st.markdown(f"**สังกัดโรงเรียน:** {teacher['school_affiliation'] or '-'}")
                         st.markdown(f"**วิชาเอก:** {teacher['major_subject'] or '-'}")
                         st.markdown(f"**สอนรายวิชา:** {teacher['teaching_subjects'] or '-'}")
                         st.markdown(f"**เบอร์ติดต่อ:** {teacher['contact_number'] or '-'}")
-                    with col_right:
+                    
+                    with col_photo:
                         if teacher['photo_path']:
                             photo_path_full = os.path.join(UPLOAD_FOLDER, teacher['photo_path'])
                             if os.path.exists(photo_path_full):
-                                st.image(photo_path_full, caption=f"รูป {teacher['full_name']}", width=150)
+                                st.image(photo_path_full, caption=f"รูป {teacher['full_name']}", width=120) # ลดขนาดรูป
                             else:
                                 st.warning("ไม่พบไฟล์รูปภาพ")
                         else:
                             st.info("ไม่มีรูปภาพ")
                     
-                    st.markdown("<br>", unsafe_allow_html=True)  # เพิ่มช่องว่างก่อนปุ่ม
-                    # ปุ่มแก้ไขและลบ
-                    edit_button = st.button(f"✏️ แก้ไข", key=f"edit_teacher_{teacher['id']}", use_container_width=True)
-                    delete_button = st.button(f"🗑️ ลบ", key=f"delete_teacher_{teacher['id']}", use_container_width=True)
-                    
-                    if edit_button:
-                        st.session_state.current_view = 'edit'
-                        st.session_state.edit_teacher_id = teacher['id']
-                        st.rerun() # รีรันเพื่อไปหน้าแก้ไข
-                    
-                    if delete_button:
-                        # เมื่อกดปุ่ม 'ลบ' ครั้งแรก ให้แสดงปุ่มยืนยัน
-                        st.session_state[f'show_confirm_delete_{teacher["id"]}'] = True
-                        st.rerun() # รีรันเพื่อให้ปุ่มยืนยันปรากฏ
+                    with col_buttons:
+                        st.markdown("<div style='text-align: right; margin-top: 20px;'>", unsafe_allow_html=True) # จัดปุ่มไปทางขวาและเพิ่มระยะห่าง
+                        edit_button = st.button(f"✏️", key=f"edit_teacher_{teacher['id']}", help="แก้ไขข้อมูล", args=[teacher['id']], use_container_width=False)
+                        delete_button = st.button(f"🗑️", key=f"delete_teacher_{teacher['id']}", help="ลบข้อมูล", args=[teacher['id']], use_container_width=False)
+                        st.markdown("</div>", unsafe_allow_html=True)
 
-                    # กลไกยืนยันการลบสองชั้น
-                    if st.session_state.get(f'show_confirm_delete_{teacher["id"]}', False):
-                        col_confirm_del1, col_confirm_del2 = st.columns([1,1])
-                        with col_confirm_del1:
+                        # ใช้ CSS class สำหรับปุ่มขนาดเล็ก
+                        st.markdown(f"""
+                            <style>
+                                #st-b-edit_teacher_{teacher['id']} > button {{
+                                    {'.small-button.edit-btn' if edit_button else '.small-button.edit-btn'}
+                                }}
+                                #st-b-delete_teacher_{teacher['id']} > button {{
+                                    {'.small-button.delete-btn' if delete_button else '.small-button.delete-btn'}
+                                }}
+                            </style>
+                        """, unsafe_allow_html=True)
+                        
+                        if edit_button:
+                            st.session_state.current_view = 'edit'
+                            st.session_state.edit_teacher_id = teacher['id']
+                            st.rerun() 
+                        
+                        if delete_button:
+                            st.session_state[f'show_confirm_delete_{teacher["id"]}'] = True
+                            st.rerun() 
+
+                        # กลไกยืนยันการลบสองชั้น
+                        if st.session_state.get(f'show_confirm_delete_{teacher["id"]}', False):
+                            st.markdown("<br>", unsafe_allow_html=True) # เพิ่มช่องว่าง
                             st.warning(f"คุณต้องการลบ '{teacher['full_name']}' ใช่หรือไม่?")
-                            if st.button("ยืนยันการลบ", key=f"confirm_delete_final_{teacher['id']}", type="primary", use_container_width=True):
+                            confirm_col1, confirm_col2 = st.columns([1,1])
+                            with confirm_col1:
+                                confirm_del_btn = st.button("ยืนยันการลบ", key=f"confirm_delete_final_{teacher['id']}", type="primary", use_container_width=True)
+                                st.markdown(f"""
+                                    <style>
+                                        #st-b-confirm_delete_final_{teacher['id']} > button {{
+                                            .small-button.confirm-delete-btn
+                                        }}
+                                    </style>
+                                """, unsafe_allow_html=True)
+                            with confirm_col2:
+                                cancel_del_btn = st.button("ยกเลิก", key=f"cancel_delete_{teacher['id']}", use_container_width=True)
+                                st.markdown(f"""
+                                    <style>
+                                        #st-b-cancel_delete_{teacher['id']} > button {{
+                                            .small-button.cancel-btn
+                                        }}
+                                    </style>
+                                """, unsafe_allow_html=True)
+
+                            if confirm_del_btn:
                                 if delete_teacher_from_db(teacher['id']):
                                     st.session_state.current_view = 'list'
-                                # ล้างสถานะการยืนยันหลังจากการลบเสร็จสิ้น
                                 del st.session_state[f'show_confirm_delete_{teacher["id"]}'] 
                                 st.rerun()
-                        with col_confirm_del2:
-                            st.write("") # เพิ่มช่องว่าง
-                            if st.button("ยกเลิก", key=f"cancel_delete_{teacher['id']}", use_container_width=True):
+                            if cancel_del_btn:
                                 del st.session_state[f'show_confirm_delete_{teacher["id"]}']
                                 st.rerun()
-                st.markdown("<br>", unsafe_allow_html=True)  # เพิ่มช่องว่างระหว่าง Card
+                st.markdown("---") # เส้นแบ่งเล็กๆ ระหว่าง card
 
         else:
             st.info("ไม่พบข้อมูลครูในระบบ หรือไม่พบผลการค้นหา")
