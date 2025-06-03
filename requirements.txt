@@ -1,0 +1,5 @@
+streamlit>=1.30.0 # ใช้เวอร์ชันล่าสุดที่รองรับ
+# sqlite3 comes with Python, so no need to list it,
+# but adding it here is harmless.
+# If you used pandas for data manipulation in app.py:
+# pandas>=2.0.0
