@@ -196,27 +196,27 @@ def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subjec
         return False
 
     updates = []
-    params = {}
+    params = [] # Use a list for positional parameters
 
     if full_name is not None and full_name != current_teacher['full_name']:
-        updates.append("full_name = :full_name")
-        params['full_name'] = full_name
+        updates.append("full_name = ?")
+        params.append(full_name)
     if school_affiliation is not None and school_affiliation != current_teacher['school_affiliation']:
-        updates.append("school_affiliation = :school_affiliation")
-        params['school_affiliation'] = school_affiliation
+        updates.append("school_affiliation = ?")
+        params.append(school_affiliation)
     if major_subject is not None and major_subject != current_teacher['major_subject']:
-        updates.append("major_subject = :major_subject")
-        params['major_subject'] = major_subject
+        updates.append("major_subject = ?")
+        params.append(major_subject)
     if teaching_subjects is not None and teaching_subjects != current_teacher['teaching_subjects']:
-        updates.append("teaching_subjects = :teaching_subjects")
-        params['teaching_subjects'] = teaching_subjects
+        updates.append("teaching_subjects = ?")
+        params.append(teaching_subjects)
     if contact_number is not None and contact_number != current_teacher['contact_number']:
-        updates.append("contact_number = :contact_number")
-        params['contact_number'] = contact_number
+        updates.append("contact_number = ?")
+        params.append(contact_number)
     # เพิ่มการอัปเดตตำแหน่ง
-    if position is not None and position != current_teacher.get('position', ''): # ใช้ .get เผื่อข้อมูลเก่าไม่มีตำแหน่ง
-        updates.append("position = :position")
-        params['position'] = position
+    if position is not None and position != current_teacher.get('position', ''): 
+        updates.append("position = ?")
+        params.append(position)
     
     if photo_file:
         if current_teacher and current_teacher['photo_path']:
@@ -234,8 +234,8 @@ def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subjec
             with open(saved_photo_path_full, "wb") as f:
                 f.write(photo_file.getbuffer())
             saved_photo_path = new_filename
-            updates.append("photo_path = :photo_path")
-            params['photo_path'] = saved_photo_path
+            updates.append("photo_path = ?")
+            params.append(saved_photo_path)
             st.toast(f"บันทึกรูปภาพใหม่: {saved_photo_path_full}", icon="📸")
         except Exception as e:
             st.error(f"เกิดข้อผิดพลาดในการบันทึกรูปภาพใหม่: {e}")
@@ -249,25 +249,77 @@ def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subjec
                     st.info(f"ลบรูปภาพ (ตามคำสั่ง): {old_photo_full_path}")
                 except Exception as e:
                     st.warning(f"เกิดข้อผิดพลาดในการลบรูปภาพ (ตามคำสั่ง): {e}")
-        updates.append("photo_path = :photo_path")
-        params['photo_path'] = None
+        updates.append("photo_path = ?")
+        params.append(None) # Set photo_path to NULL if cleared
 
     if not updates:
         st.info("ไม่มีข้อมูลที่เปลี่ยนแปลง")
         return False
 
-    params['id'] = teacher_id
-    query = f"UPDATE teachers SET {', '.join(updates)} WHERE id = :id"
+    params.append(teacher_id) # Add the ID for the WHERE clause
+    query = f"UPDATE teachers SET {', '.join(updates)} WHERE id = ?"
     
     if hasattr(conn, 'session'):
+        # For st.connection, still use named parameters if possible for clarity,
+        # or adapt to use positional parameters if st.connection also supports it.
+        # For simplicity and consistency with the SQLite raw connection, we'll
+        # adjust to use positional parameters here as well.
+        # The key is that the 'params' dictionary for st.connection needs to match
+        # the named placeholders you would use.
+        # Let's revert the st.connection part to use named params as before, 
+        # as it handles it well. We only change the direct sqlite3 part.
+        
+        # --- Original logic for st.connection (which works) ---
+        named_params = {}
+        idx = 0
+        if full_name is not None and full_name != current_teacher['full_name']:
+            named_params['full_name'] = full_name
+        if school_affiliation is not None and school_affiliation != current_teacher['school_affiliation']:
+            named_params['school_affiliation'] = school_affiliation
+        if major_subject is not None and major_subject != current_teacher['major_subject']:
+            named_params['major_subject'] = major_subject
+        if teaching_subjects is not None and teaching_subjects != current_teacher['teaching_subjects']:
+            named_params['teaching_subjects'] = teaching_subjects
+        if contact_number is not None and contact_number != current_teacher['contact_number']:
+            named_params['contact_number'] = contact_number
+        if position is not None and position != current_teacher.get('position', ''):
+            named_params['position'] = position
+
+        # Re-evaluate photo_path for named_params
+        if photo_file:
+             # Logic for saved_photo_path needs to be here to be consistent
+            try:
+                extension = os.path.splitext(photo_file.name)[1]
+                new_filename = f"{os.path.splitext(photo_file.name)[0]}_{os.urandom(8).hex()}{extension}"
+                saved_photo_path_full = os.path.join(UPLOAD_FOLDER, new_filename)
+                with open(saved_photo_path_full, "wb") as f:
+                    f.write(photo_file.getbuffer())
+                saved_photo_path = new_filename
+                named_params['photo_path'] = saved_photo_path
+            except Exception as e:
+                st.error(f"เกิดข้อผิดพลาดในการบันทึกรูปภาพใหม่: {e}")
+                named_params['photo_path'] = None # Ensure it's handled even on error
+        elif st.session_state.get('photo_cleared', False):
+            named_params['photo_path'] = None # Explicitly set to None for clearing
+
+        named_params['id'] = teacher_id
+        
+        # Construct the query string with named parameters for st.connection
+        named_updates = []
+        for key in named_params.keys():
+            if key != 'id': # Don't add 'id' to the SET clause
+                named_updates.append(f"{key} = :{key}")
+        named_query = f"UPDATE teachers SET {', '.join(named_updates)} WHERE id = :id"
+
         with conn.session as s:
-            s.execute(query, params=params)
+            s.execute(named_query, params=named_params)
             s.commit()
     else:
+        # --- Modified logic for direct sqlite3 connection ---
         cursor = conn.cursor()
-        st.error("การอัปเดตข้อมูลผ่าน SQLite โดยตรงไม่รองรับการอัปเดตแบบไดนามิกหลายฟิลด์อย่างสมบูรณ์ด้วยวิธีการนี้")
+        cursor.execute(query, tuple(params)) # Pass parameters as a tuple
+        conn.commit()
         conn.close()
-        return False
     st.cache_data.clear()
     st.success(f"ข้อมูลครู ID {teacher_id} อัปเดตสำเร็จ!")
     return True
@@ -494,7 +546,7 @@ with content_container:
                                 st.warning("ไม่พบไฟล์รูปภาพ")
                         else:
                             st.info("ไม่มีรูปภาพ")
-                        
+                    
                         st.markdown("<br>", unsafe_allow_html=True) 
                         edit_button = st.button(f"✏️ แก้ไข", key=f"edit_teacher_{teacher['id']}", use_container_width=True)
                         delete_button = st.button(f"🗑️ ลบ", key=f"delete_teacher_{teacher['id']}", use_container_width=True)
