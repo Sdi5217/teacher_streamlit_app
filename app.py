@@ -18,8 +18,9 @@ def get_db_connection():
     พยายามใช้ st.connection ถ้ามี, ไม่เช่นนั้นจะ fallback ไปใช้ sqlite3 โดยตรง.
     """
     try:
+        # ตรวจสอบว่า Streamlit กำลังทำงานในโหมดที่รองรับ st.connection (เช่นบน Streamlit Community Cloud)
+        # และมีการตั้งค่าการเชื่อมต่อ teacher_db ใน secrets
         if "connections" in st.secrets and "teacher_db" in st.secrets["connections"]:
-            # ใช้ st.connection สำหรับการ deploy บน Streamlit Community Cloud
             return st.connection('teacher_db', type='sql')
     except Exception:
         pass # หากไม่มี st.secrets หรือเกิดข้อผิดพลาด ให้ลองใช้ sqlite3 โดยตรง
@@ -55,7 +56,8 @@ def setup_database():
             s.commit()
             
             # ตรวจสอบและเพิ่มคอลัมน์ 'position' หากยังไม่มี (เพื่อรองรับฐานข้อมูลเก่า)
-            cursor = s.connection.cursor() # เข้าถึง sqlite3 cursor จาก st.connection
+            # ต้องเข้าถึง cursor จากการเชื่อมต่อของ session
+            cursor = s.connection.cursor() 
             cursor.execute("PRAGMA table_info(teachers)")
             columns = [col[1] for col in cursor.fetchall()]
             if 'position' not in columns:
@@ -156,7 +158,8 @@ def get_teacher_by_id_from_db(teacher_id):
     if hasattr(conn, 'session'):
         # สำหรับ st.connection
         try:
-            teacher = conn.query(f'SELECT * FROM teachers WHERE id = {teacher_id}', ttl=0).iloc[0].to_dict()
+            # ใช้ params เพื่อความปลอดภัยและหลีกเลี่ยง SQL Injection
+            teacher = conn.query('SELECT * FROM teachers WHERE id = :id', params={'id': teacher_id}, ttl=0).iloc[0].to_dict()
             return teacher
         except IndexError:
             return None # ไม่พบข้อมูล
@@ -228,31 +231,37 @@ def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subjec
         return False
 
     updates = []
-    # ใช้ List สำหรับเก็บค่าพารามิเตอร์แบบ Positional สำหรับ sqlite3 โดยตรง
-    params = [] 
+    params_sqlite = [] # ใช้สำหรับ sqlite3 โดยตรง (positional parameters)
+    params_st_conn = {} # ใช้สำหรับ st.connection (named parameters)
 
     # ตรวจสอบว่ามีการเปลี่ยนแปลงข้อมูลในแต่ละฟิลด์หรือไม่
     if full_name is not None and full_name != current_teacher['full_name']:
         updates.append("full_name = ?")
-        params.append(full_name)
+        params_sqlite.append(full_name)
+        params_st_conn['full_name'] = full_name
     if school_affiliation is not None and school_affiliation != current_teacher['school_affiliation']:
         updates.append("school_affiliation = ?")
-        params.append(school_affiliation)
+        params_sqlite.append(school_affiliation)
+        params_st_conn['school_affiliation'] = school_affiliation
     if major_subject is not None and major_subject != current_teacher['major_subject']:
         updates.append("major_subject = ?")
-        params.append(major_subject)
+        params_sqlite.append(major_subject)
+        params_st_conn['major_subject'] = major_subject
     if teaching_subjects is not None and teaching_subjects != current_teacher['teaching_subjects']:
         updates.append("teaching_subjects = ?")
-        params.append(teaching_subjects)
+        params_sqlite.append(teaching_subjects)
+        params_st_conn['teaching_subjects'] = teaching_subjects
     if contact_number is not None and contact_number != current_teacher['contact_number']:
         updates.append("contact_number = ?")
-        params.append(contact_number)
+        params_sqlite.append(contact_number)
+        params_st_conn['contact_number'] = contact_number
     # เพิ่มการอัปเดตตำแหน่ง
     if position is not None and position != current_teacher.get('position', ''): 
         updates.append("position = ?")
-        params.append(position)
+        params_sqlite.append(position)
+        params_st_conn['position'] = position
     
-    saved_photo_path = None # กำหนดค่าเริ่มต้นสำหรับ saved_photo_path
+    saved_photo_path = None 
     if photo_file:
         # ถ้ามีไฟล์รูปภาพใหม่ถูกอัปโหลด
         if current_teacher and current_teacher['photo_path']:
@@ -273,7 +282,8 @@ def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subjec
                 f.write(photo_file.getbuffer())
             saved_photo_path = new_filename
             updates.append("photo_path = ?")
-            params.append(saved_photo_path)
+            params_sqlite.append(saved_photo_path)
+            params_st_conn['photo_path'] = saved_photo_path
             st.toast(f"บันทึกรูปภาพใหม่: {saved_photo_path_full}", icon="📸")
         except Exception as e:
             st.error(f"เกิดข้อผิดพลาดในการบันทึกรูปภาพใหม่: {e}")
@@ -289,68 +299,32 @@ def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subjec
                 except Exception as e:
                     st.warning(f"เกิดข้อผิดพลาดในการลบรูปภาพ (ตามคำสั่ง): {e}")
         updates.append("photo_path = ?")
-        params.append(None) # ตั้งค่า photo_path เป็น NULL ในฐานข้อมูล
+        params_sqlite.append(None) # ตั้งค่า photo_path เป็น NULL ในฐานข้อมูล
+        params_st_conn['photo_path'] = None
 
     if not updates:
         st.info("ไม่มีข้อมูลที่เปลี่ยนแปลง")
         return False
 
-    params.append(teacher_id) # เพิ่ม ID ของครูเป็นพารามิเตอร์สุดท้ายสำหรับ WHERE clause
-    # สร้างคำสั่ง SQL สำหรับ UPDATE โดยใช้ Positional Parameters (?)
-    query = f"UPDATE teachers SET {', '.join(updates)} WHERE id = ?"
+    params_sqlite.append(teacher_id) # เพิ่ม ID ของครูเป็นพารามิเตอร์สุดท้ายสำหรับ WHERE clause
+    params_st_conn['id'] = teacher_id
     
     if hasattr(conn, 'session'):
         # สำหรับ st.connection (ใช้ Named Parameters)
-        named_params = {}
-        # คัดลอกค่าจาก params list ไปยัง named_params dictionary
-        # ตรวจสอบและเพิ่มเฉพาะคอลัมน์ที่มีการเปลี่ยนแปลง
-        if full_name is not None and full_name != current_teacher['full_name']:
-            named_params['full_name'] = full_name
-        if school_affiliation is not None and school_affiliation != current_teacher['school_affiliation']:
-            named_params['school_affiliation'] = school_affiliation
-        if major_subject is not None and major_subject != current_teacher['major_subject']:
-            named_params['major_subject'] = major_subject
-        if teaching_subjects is not None and teaching_subjects != current_teacher['teaching_subjects']:
-            named_params['teaching_subjects'] = teaching_subjects
-        if contact_number is not None and contact_number != current_teacher['contact_number']:
-            named_params['contact_number'] = contact_number
-        if position is not None and position != current_teacher.get('position', ''):
-            named_params['position'] = position
-
-        # จัดการ photo_path สำหรับ named_params
-        if photo_file:
-            # ต้องสร้าง saved_photo_path อีกครั้งเพื่อให้ named_params มีค่าที่ถูกต้อง
-            try:
-                extension = os.path.splitext(photo_file.name)[1]
-                new_filename = f"{os.path.splitext(photo_file.name)[0]}_{os.urandom(8).hex()}{extension}"
-                saved_photo_path_full = os.path.join(UPLOAD_FOLDER, new_filename)
-                with open(saved_photo_path_full, "wb") as f:
-                    f.write(photo_file.getbuffer())
-                saved_photo_path = new_filename
-                named_params['photo_path'] = saved_photo_path
-            except Exception as e:
-                st.error(f"เกิดข้อผิดพลาดในการบันทึกรูปภาพใหม่: {e}")
-                named_params['photo_path'] = None 
-        elif st.session_state.get('photo_cleared', False):
-            named_params['photo_path'] = None
-
-        named_params['id'] = teacher_id
-        
-        # สร้าง query string ที่มี named parameters สำหรับ st.connection
-        # เฉพาะคอลัมน์ที่อยู่ใน named_params (ยกเว้น 'id')
         named_updates_clause = []
-        for key in named_params.keys():
+        for key in params_st_conn.keys():
             if key != 'id': 
                 named_updates_clause.append(f"{key} = :{key}")
         named_query = f"UPDATE teachers SET {', '.join(named_updates_clause)} WHERE id = :id"
 
         with conn.session as s:
-            s.execute(named_query, params=named_params)
+            s.execute(named_query, params=params_st_conn)
             s.commit()
     else:
         # สำหรับ sqlite3 โดยตรง (ใช้ Positional Parameters)
         cursor = conn.cursor()
-        cursor.execute(query, tuple(params)) # ส่ง List ของพารามิเตอร์เป็น Tuple
+        query = f"UPDATE teachers SET {', '.join(updates)} WHERE id = ?" # สร้างคำสั่ง SQL ที่ใช้ ?
+        cursor.execute(query, tuple(params_sqlite)) # ส่ง List ของพารามิเตอร์เป็น Tuple
         conn.commit()
         conn.close()
     st.cache_data.clear()
@@ -521,10 +495,10 @@ with nav_container:
         # ปุ่มดาวน์โหลดไฟล์ Excel
         excel_file_data = export_teachers_to_excel()
         st.download_button(
-            label="⬇️ Export ข้อมูลครู (.xlsx)",  
+            label="⬇️ Export ข้อมูลครู (.xlsx)",   
             data=excel_file_data,
-            file_name="ข้อมูลครู_กลุ่มโรงเรียนบ้านด่าน2.xlsx",  
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  
+            file_name="ข้อมูลครู_กลุ่มโรงเรียนบ้านด่าน2.xlsx",   
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",   
             key="download_excel_button",
             use_container_width=True
         )
@@ -542,8 +516,8 @@ with content_container:
             search_col_input, search_col_button = st.columns([3, 1])
             with search_col_input:
                 search_term = st.text_input(
-                    "ค้นหาสังกัดโรงเรียน:",  
-                    value=st.session_state.search_query_school,  
+                    "ค้นหาสังกัดโรงเรียน:",   
+                    value=st.session_state.search_query_school,   
                     key="school_search_input",
                     placeholder="เช่น บ้านด่านเหนือ"
                 )
@@ -560,7 +534,7 @@ with content_container:
         if st.session_state.search_query_school:
             search_lower = st.session_state.search_query_school.lower()
             filtered_teachers = [
-                t for t in teachers  
+                t for t in teachers   
                 if t['school_affiliation'] and search_lower in t['school_affiliation'].lower()
             ]
             st.info(f"แสดงผลการค้นหาสำหรับสังกัดโรงเรียน: '{st.session_state.search_query_school}' ({len(filtered_teachers)} รายการ)")
@@ -570,7 +544,7 @@ with content_container:
 
         if teachers_to_display:
             # วนลูปแสดงข้อมูลครูแต่ละคนในรูปแบบ Card
-            for teacher in teachers_to_display:  
+            for teacher in teachers_to_display:   
                 teacher_card = st.container(border=True)  # สร้าง Card พร้อมเส้นขอบ
                 with teacher_card:
                     col_left, col_right = st.columns([2, 1]) # แบ่ง 2 คอลัมน์ภายใน Card
@@ -591,29 +565,37 @@ with content_container:
                         else:
                             st.info("ไม่มีรูปภาพ")
                     
-                        st.markdown("<br>", unsafe_allow_html=True)  # เพิ่มช่องว่างก่อนปุ่ม
-                        # ปุ่มแก้ไขและลบ
-                        edit_button = st.button(f"✏️ แก้ไข", key=f"edit_teacher_{teacher['id']}", use_container_width=True)
-                        delete_button = st.button(f"🗑️ ลบ", key=f"delete_teacher_{teacher['id']}", use_container_width=True)
-                        
-                        if edit_button:
-                            st.session_state.current_view = 'edit'
-                            st.session_state.edit_teacher_id = teacher['id']
-                            st.rerun() # รีรันเพื่อไปหน้าแก้ไข
-                        
-                        if delete_button:
-                            # กลไกยืนยันการลบสองชั้น
-                            if st.session_state.get(f'confirm_delete_{teacher["id"]}', False):
-                                # ปุ่มยืนยันการลบจริง
-                                if st.button("ยืนยันการลบ", key=f"confirm_delete_final_{teacher['id']}", type="primary", use_container_width=True):
-                                    if delete_teacher_from_db(teacher['id']):
-                                        st.session_state.current_view = 'list'
-                                    del st.session_state[f'confirm_delete_{teacher["id"]}'] # ลบสถานะยืนยัน
-                                    st.rerun()
-                            else:
-                                # แสดงข้อความเตือนให้ยืนยันการลบ
-                                st.session_state[f'confirm_delete_{teacher["id"]}'] = True
-                                st.warning(f"คลิก 'ยืนยันการลบ' เพื่อลบ '{teacher['full_name']}'")
+                    st.markdown("<br>", unsafe_allow_html=True)  # เพิ่มช่องว่างก่อนปุ่ม
+                    # ปุ่มแก้ไขและลบ
+                    edit_button = st.button(f"✏️ แก้ไข", key=f"edit_teacher_{teacher['id']}", use_container_width=True)
+                    delete_button = st.button(f"🗑️ ลบ", key=f"delete_teacher_{teacher['id']}", use_container_width=True)
+                    
+                    if edit_button:
+                        st.session_state.current_view = 'edit'
+                        st.session_state.edit_teacher_id = teacher['id']
+                        st.rerun() # รีรันเพื่อไปหน้าแก้ไข
+                    
+                    if delete_button:
+                        # เมื่อกดปุ่ม 'ลบ' ครั้งแรก ให้แสดงปุ่มยืนยัน
+                        st.session_state[f'show_confirm_delete_{teacher["id"]}'] = True
+                        st.rerun() # รีรันเพื่อให้ปุ่มยืนยันปรากฏ
+
+                    # กลไกยืนยันการลบสองชั้น
+                    if st.session_state.get(f'show_confirm_delete_{teacher["id"]}', False):
+                        col_confirm_del1, col_confirm_del2 = st.columns([1,1])
+                        with col_confirm_del1:
+                            st.warning(f"คุณต้องการลบ '{teacher['full_name']}' ใช่หรือไม่?")
+                            if st.button("ยืนยันการลบ", key=f"confirm_delete_final_{teacher['id']}", type="primary", use_container_width=True):
+                                if delete_teacher_from_db(teacher['id']):
+                                    st.session_state.current_view = 'list'
+                                # ล้างสถานะการยืนยันหลังจากการลบเสร็จสิ้น
+                                del st.session_state[f'show_confirm_delete_{teacher["id"]}'] 
+                                st.rerun()
+                        with col_confirm_del2:
+                            st.write("") # เพิ่มช่องว่าง
+                            if st.button("ยกเลิก", key=f"cancel_delete_{teacher['id']}", use_container_width=True):
+                                del st.session_state[f'show_confirm_delete_{teacher["id"]}']
+                                st.rerun()
                 st.markdown("<br>", unsafe_allow_html=True)  # เพิ่มช่องว่างระหว่าง Card
 
         else:
