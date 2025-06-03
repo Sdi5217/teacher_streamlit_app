@@ -4,13 +4,19 @@ import os
 import shutil
 from PIL import Image
 
-# --- Configuration ---
+# --- Configuration (ตั้งค่าพื้นฐาน) ---
 DATABASE_NAME = 'teacher_management.db'
 PHOTO_DIR = 'teacher_photos'
-UPLOAD_FOLDER = PHOTO_DIR 
+UPLOAD_FOLDER = PHOTO_DIR # โฟลเดอร์สำหรับเก็บรูปภาพที่ผู้ใช้อัปโหลด
 
-# --- Database Setup and Functions (ส่วนนี้ไม่มีการเปลี่ยนแปลง) ---
+# --- Database Setup and Functions (ฟังก์ชันจัดการฐานข้อมูล) ---
+
 def get_db_connection():
+    """
+    พยายามเชื่อมต่อฐานข้อมูลโดยใช้ st.connection สำหรับ Streamlit Cloud หากมีการตั้งค่าไว้
+    หากไม่สามารถเชื่อมต่อได้ (เช่น รันในเครื่อง local หรือไม่ได้ตั้งค่าบน Cloud)
+    จะ fallback ไปใช้ sqlite3.connect โดยตรง
+    """
     try:
         if "connections" in st.secrets and "teacher_db" in st.secrets["connections"]:
             return st.connection('teacher_db', type='sql')
@@ -21,7 +27,12 @@ def get_db_connection():
     return conn
 
 def setup_database():
+    """
+    ตั้งค่าตาราง 'teachers' ในฐานข้อมูลหากยังไม่มี และสร้างโฟลเดอร์สำหรับเก็บรูปภาพ.
+    รองรับทั้งการเชื่อมต่อผ่าน Streamlit และ sqlite3 โดยตรง
+    """
     conn = get_db_connection()
+    
     if hasattr(conn, 'session'):
         with conn.session as s:
             s.execute('''
@@ -53,9 +64,10 @@ def setup_database():
         conn.close()
     if not os.path.exists(UPLOAD_FOLDER):
         os.makedirs(UPLOAD_FOLDER)
-    
+
 @st.cache_data(ttl=3600)
 def get_all_teachers_from_db_cached():
+    """ดึงข้อมูลครูทั้งหมดจากฐานข้อมูลและทำการแคช"""
     conn = get_db_connection()
     if hasattr(conn, 'session'):
         df = conn.query('SELECT * FROM teachers', ttl=0)
@@ -67,6 +79,7 @@ def get_all_teachers_from_db_cached():
         return [dict(t) for t in teachers]
 
 def get_teacher_by_id_from_db(teacher_id):
+    """ดึงข้อมูลครูหนึ่งคนตาม ID"""
     conn = get_db_connection()
     if hasattr(conn, 'session'):
         try:
@@ -81,6 +94,7 @@ def get_teacher_by_id_from_db(teacher_id):
         return dict(teacher) if teacher else None
 
 def add_teacher_to_db(full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_file=None):
+    """เพิ่มข้อมูลครูใหม่ลงในฐานข้อมูล รวมถึงบันทึกไฟล์รูปภาพหากมี"""
     conn = get_db_connection()
     saved_photo_path = None
     if photo_file:
@@ -243,12 +257,9 @@ st.set_page_config(
 )
 
 # --- ส่วนหัว: ชื่อระบบและโลโก้ ---
-# สร้างคอลัมน์เพื่อจัดวางชื่อและโลโก้
-# กำหนดสัดส่วนของคอลัมน์เพื่อให้ชื่อมีพื้นที่มากพอ และโลโก้มีพื้นที่น้อยลง (เช่น 5:1)
 col_text, col_logo = st.columns([5, 1])
 
 with col_text:
-    # ใช้ st.markdown เพื่อให้สามารถแสดงข้อความหัวข้อและควบคุมการจัดวางได้ยืดหยุ่นกว่า st.title
     st.markdown("## 👨‍🏫 ระบบจัดการฐานข้อมูลครูกลุ่มโรงเรียนบ้านด่าน 2", unsafe_allow_html=True)
 
 with col_logo:
@@ -256,8 +267,6 @@ with col_logo:
     if os.path.exists(logo_path):
         try:
             logo = Image.open(logo_path)
-            # st.image จะวางรูปภาพในแนวตั้งตรงกลางคอลัมน์
-            # ใช้ width=100 หรือตามความเหมาะสม เพื่อให้โลโก้มีขนาดเล็กพอที่จะอยู่ข้างชื่อ
             st.image(logo, width=100) 
         except Exception as e:
             st.error(f"เกิดข้อผิดพลาดในการโหลดโลโก้: {e}")
@@ -309,9 +318,10 @@ if st.session_state.current_view == 'list':
                 st.markdown(f"**เบอร์ติดต่อ:** {teacher['contact_number'] or '-'}")
             with col_right:
                 if teacher['photo_path']:
+                    # แก้ไขชื่อตัวแปรตรงนี้ จาก photo_full_path เป็น photo_path_full
                     photo_path_full = os.path.join(UPLOAD_FOLDER, teacher['photo_path'])
-                    if os.path.exists(photo_full_path):
-                        st.image(photo_path_full, caption=f"รูป {teacher['full_name']}", width=150)
+                    if os.path.exists(photo_path_full): # <-- แก้ไขตรงนี้
+                        st.image(photo_path_full, caption=f"รูป {teacher['full_name']}", width=150) # <-- และตรงนี้
                     else:
                         st.warning("ไม่พบไฟล์รูปภาพ")
                 else:
@@ -374,8 +384,8 @@ elif st.session_state.current_view == 'edit':
 
                 if teacher_data['photo_path']:
                     photo_path_full = os.path.join(UPLOAD_FOLDER, teacher_data['photo_path'])
-                    if os.path.exists(photo_full_path):
-                        st.image(photo_full_path, caption="รูปภาพปัจจุบัน", width=150)
+                    if os.path.exists(photo_path_full):
+                        st.image(photo_path_full, caption="รูปภาพปัจจุบัน", width=150)
                     else:
                         st.warning("ไม่พบไฟล์รูปภาพปัจจุบันในโฟลเดอร์")
                 else:
