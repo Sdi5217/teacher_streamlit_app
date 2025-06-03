@@ -3,6 +3,7 @@ import sqlite3
 import os
 import shutil
 from PIL import Image
+import pandas as pd # นำเข้า pandas
 
 # --- Configuration ---
 DATABASE_NAME = 'teacher_management.db'
@@ -58,15 +59,58 @@ def setup_database():
 
 @st.cache_data(ttl=3600)
 def get_all_teachers_from_db_cached():
+    """ดึงข้อมูลครูทั้งหมดจากฐานข้อมูลและทำการแคช"""
     conn = get_db_connection()
     if hasattr(conn, 'session'):
-        df = conn.query('SELECT * FROM teachers', ttl=0)
+        # เมื่อใช้ st.connection.query() จะได้ pandas DataFrame โดยตรง
+        df = conn.query('SELECT * FROM teachers', ttl=0) 
         return df.to_dict(orient='records')
     else:
+        # สำหรับ sqlite3 โดยตรง ยังคงต้องดึงข้อมูลและแปลงเป็น dict
         cursor = conn.cursor()
         teachers = cursor.execute('SELECT * FROM teachers').fetchall()
         conn.close()
         return [dict(t) for t in teachers]
+
+# เพิ่มฟังก์ชันสำหรับ Export ข้อมูล
+def export_teachers_to_excel():
+    """ดึงข้อมูลครูทั้งหมดและส่งออกเป็นไฟล์ Excel"""
+    conn = get_db_connection()
+    if hasattr(conn, 'session'):
+        df = conn.query('SELECT * FROM teachers', ttl=0)
+    else:
+        # สำหรับ sqlite3 โดยตรง: ดึงข้อมูลทั้งหมด
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_path FROM teachers")
+        data = cursor.fetchall()
+        column_names = [description[0] for description in cursor.description]
+        conn.close()
+        df = pd.DataFrame(data, columns=column_names)
+
+    # ปรับปรุงชื่อคอลัมน์ให้อ่านง่ายขึ้นใน Excel
+    df.rename(columns={
+        'id': 'รหัสครู',
+        'full_name': 'ชื่อ-สกุล',
+        'school_affiliation': 'สังกัดโรงเรียน',
+        'major_subject': 'วิชาเอก',
+        'teaching_subjects': 'สอนรายวิชา',
+        'contact_number': 'เบอร์ติดต่อ',
+        'photo_path': 'เส้นทางไฟล์รูปภาพ' # อาจไม่จำเป็นต้องใช้ใน Excel แต่เก็บไว้เพื่อความสมบูรณ์
+    }, inplace=True)
+    
+    # ลบคอลัมน์ photo_path ออกจากไฟล์ Excel หากไม่ต้องการ
+    # if 'เส้นทางไฟล์รูปภาพ' in df.columns:
+    #     df = df.drop(columns=['เส้นทางไฟล์รูปภาพ'])
+
+    # สร้างไฟล์ Excel ในหน่วยความจำ
+    output = pd.ExcelWriter('teachers_data.xlsx', engine='xlsxwriter')
+    df.to_excel(output, index=False, sheet_name='ข้อมูลครู')
+    output.close() # ปิด ExcelWriter เพื่อบันทึกไฟล์
+
+    with open('teachers_data.xlsx', 'rb') as f:
+        file_data = f.read()
+    os.remove('teachers_data.xlsx') # ลบไฟล์ชั่วคราวหลังจากอ่านข้อมูลแล้ว
+    return file_data
 
 def get_teacher_by_id_from_db(teacher_id):
     conn = get_db_connection()
@@ -251,7 +295,7 @@ with col_text:
     st.markdown("## 👨‍🏫 ระบบจัดการฐานข้อมูลครูกลุ่มโรงเรียนบ้านด่าน 2", unsafe_allow_html=True)
 
 with col_logo:
-    logo_path = "ban_dan_2_logo.png"  # **ตรวจสอบให้แน่ใจว่า path นี้ถูกต้อง**
+    logo_path = "ban_dan_2_logo.png"  # ตรวจสอบให้แน่ใจว่า path นี้ถูกต้อง
     if os.path.exists(logo_path):
         try:
             logo = Image.open(logo_path)
@@ -270,20 +314,19 @@ if 'edit_teacher_id' not in st.session_state:
     st.session_state.edit_teacher_id = None
 if 'photo_cleared' not in st.session_state:
     st.session_state.photo_cleared = False
-# เพิ่ม session state สำหรับคำค้นหา
 if 'search_query_school' not in st.session_state:
     st.session_state.search_query_school = ""
 
 setup_database()
 
 # --- Navigation Buttons ---
-col1, col2, _ = st.columns([1,1,4]) 
+col1, col2, col3, _ = st.columns([1,1,1,3]) # เพิ่มอีกหนึ่งคอลัมน์สำหรับปุ่ม Export
 with col1:
     if st.button("แสดงข้อมูลครูทั้งหมด", key="show_all", use_container_width=True):
         st.session_state.current_view = 'list'
         st.session_state.edit_teacher_id = None
         st.session_state.photo_cleared = False
-        st.session_state.search_query_school = "" # ล้างคำค้นหาเมื่อกลับมาหน้ารายการทั้งหมด
+        st.session_state.search_query_school = ""
         st.rerun()
 with col2:
     if st.button("เพิ่มข้อมูลครูใหม่", key="add_new", use_container_width=True):
@@ -291,6 +334,19 @@ with col2:
         st.session_state.edit_teacher_id = None
         st.session_state.photo_cleared = False
         st.rerun()
+with col3:
+    # ปุ่ม Export ข้อมูล
+    # ต้องเรียกใช้ฟังก์ชัน export_teachers_to_excel() ก่อน
+    # และใช้ st.download_button เพื่อให้ผู้ใช้ดาวน์โหลดไฟล์ได้
+    excel_file_data = export_teachers_to_excel()
+    st.download_button(
+        label="⬇️ Export ข้อมูลครู (.xlsx)", # ข้อความบนปุ่ม
+        data=excel_file_data,
+        file_name="ข้อมูลครู_กลุ่มโรงเรียนบ้านด่าน2.xlsx", # ชื่อไฟล์ที่จะดาวน์โหลด
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", # MIME type ของไฟล์ Excel
+        key="download_excel_button",
+        use_container_width=True
+    )
 
 st.markdown("---") 
 
@@ -308,15 +364,12 @@ if st.session_state.current_view == 'list':
             placeholder="เช่น บ้านด่านเหนือ"
         )
     with search_col_button:
-        # ใช้ st.empty เพื่อให้ปุ่มจัดวางตรงกับช่องกรอกข้อมูล
-        st.write("") # เพิ่มบรรทัดว่างเพื่อให้ปุ่มอยู่ตรงกลางแนวตั้ง
+        st.write("") 
         if st.button("ค้นหา", key="search_button", use_container_width=True):
             st.session_state.search_query_school = search_term
-            # ไม่ต้อง rerun ตรงนี้ เพราะการเปลี่ยนแปลง search_query_school จะทำให้โค้ดรันใหม่เอง
 
     teachers = get_all_teachers_from_db_cached()
     
-    # กรองข้อมูลตามคำค้นหา (ถ้ามี)
     if st.session_state.search_query_school:
         search_lower = st.session_state.search_query_school.lower()
         filtered_teachers = [
@@ -329,7 +382,7 @@ if st.session_state.current_view == 'list':
         teachers_to_display = teachers
 
     if teachers_to_display:
-        for teacher in teachers_to_display: # ใช้วงลูปกับข้อมูลที่กรองแล้ว
+        for teacher in teachers_to_display: 
             col_left, col_right = st.columns([2, 1])
             with col_left:
                 st.subheader(f"{teacher['full_name']} (ID: {teacher['id']})")
