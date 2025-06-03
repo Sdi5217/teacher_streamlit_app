@@ -4,19 +4,14 @@ import os
 import shutil
 from PIL import Image
 
-# --- Configuration (ตั้งค่าพื้นฐาน) ---
+# --- Configuration ---
 DATABASE_NAME = 'teacher_management.db'
 PHOTO_DIR = 'teacher_photos'
-UPLOAD_FOLDER = PHOTO_DIR # โฟลเดอร์สำหรับเก็บรูปภาพที่ผู้ใช้อัปโหลด
+UPLOAD_FOLDER = PHOTO_DIR 
 
-# --- Database Setup and Functions (ฟังก์ชันจัดการฐานข้อมูล) ---
+# --- Database Setup and Functions ---
 
 def get_db_connection():
-    """
-    พยายามเชื่อมต่อฐานข้อมูลโดยใช้ st.connection สำหรับ Streamlit Cloud หากมีการตั้งค่าไว้
-    หากไม่สามารถเชื่อมต่อได้ (เช่น รันในเครื่อง local หรือไม่ได้ตั้งค่าบน Cloud)
-    จะ fallback ไปใช้ sqlite3.connect โดยตรง
-    """
     try:
         if "connections" in st.secrets and "teacher_db" in st.secrets["connections"]:
             return st.connection('teacher_db', type='sql')
@@ -27,10 +22,6 @@ def get_db_connection():
     return conn
 
 def setup_database():
-    """
-    ตั้งค่าตาราง 'teachers' ในฐานข้อมูลหากยังไม่มี และสร้างโฟลเดอร์สำหรับเก็บรูปภาพ.
-    รองรับทั้งการเชื่อมต่อผ่าน Streamlit และ sqlite3 โดยตรง
-    """
     conn = get_db_connection()
     
     if hasattr(conn, 'session'):
@@ -67,7 +58,6 @@ def setup_database():
 
 @st.cache_data(ttl=3600)
 def get_all_teachers_from_db_cached():
-    """ดึงข้อมูลครูทั้งหมดจากฐานข้อมูลและทำการแคช"""
     conn = get_db_connection()
     if hasattr(conn, 'session'):
         df = conn.query('SELECT * FROM teachers', ttl=0)
@@ -79,7 +69,6 @@ def get_all_teachers_from_db_cached():
         return [dict(t) for t in teachers]
 
 def get_teacher_by_id_from_db(teacher_id):
-    """ดึงข้อมูลครูหนึ่งคนตาม ID"""
     conn = get_db_connection()
     if hasattr(conn, 'session'):
         try:
@@ -94,7 +83,6 @@ def get_teacher_by_id_from_db(teacher_id):
         return dict(teacher) if teacher else None
 
 def add_teacher_to_db(full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_file=None):
-    """เพิ่มข้อมูลครูใหม่ลงในฐานข้อมูล รวมถึงบันทึกไฟล์รูปภาพหากมี"""
     conn = get_db_connection()
     saved_photo_path = None
     if photo_file:
@@ -282,6 +270,9 @@ if 'edit_teacher_id' not in st.session_state:
     st.session_state.edit_teacher_id = None
 if 'photo_cleared' not in st.session_state:
     st.session_state.photo_cleared = False
+# เพิ่ม session state สำหรับคำค้นหา
+if 'search_query_school' not in st.session_state:
+    st.session_state.search_query_school = ""
 
 setup_database()
 
@@ -292,6 +283,7 @@ with col1:
         st.session_state.current_view = 'list'
         st.session_state.edit_teacher_id = None
         st.session_state.photo_cleared = False
+        st.session_state.search_query_school = "" # ล้างคำค้นหาเมื่อกลับมาหน้ารายการทั้งหมด
         st.rerun()
 with col2:
     if st.button("เพิ่มข้อมูลครูใหม่", key="add_new", use_container_width=True):
@@ -305,10 +297,39 @@ st.markdown("---")
 # --- Content Area ---
 if st.session_state.current_view == 'list':
     st.header("รายการข้อมูลครู")
-    teachers = get_all_teachers_from_db_cached()
 
-    if teachers:
-        for teacher in teachers:
+    # --- ส่วนค้นหา ---
+    search_col_input, search_col_button = st.columns([3, 1])
+    with search_col_input:
+        search_term = st.text_input(
+            "ค้นหาสังกัดโรงเรียน:", 
+            value=st.session_state.search_query_school, 
+            key="school_search_input",
+            placeholder="เช่น บ้านด่านเหนือ"
+        )
+    with search_col_button:
+        # ใช้ st.empty เพื่อให้ปุ่มจัดวางตรงกับช่องกรอกข้อมูล
+        st.write("") # เพิ่มบรรทัดว่างเพื่อให้ปุ่มอยู่ตรงกลางแนวตั้ง
+        if st.button("ค้นหา", key="search_button", use_container_width=True):
+            st.session_state.search_query_school = search_term
+            # ไม่ต้อง rerun ตรงนี้ เพราะการเปลี่ยนแปลง search_query_school จะทำให้โค้ดรันใหม่เอง
+
+    teachers = get_all_teachers_from_db_cached()
+    
+    # กรองข้อมูลตามคำค้นหา (ถ้ามี)
+    if st.session_state.search_query_school:
+        search_lower = st.session_state.search_query_school.lower()
+        filtered_teachers = [
+            t for t in teachers 
+            if t['school_affiliation'] and search_lower in t['school_affiliation'].lower()
+        ]
+        st.info(f"แสดงผลการค้นหาสำหรับสังกัดโรงเรียน: '{st.session_state.search_query_school}' ({len(filtered_teachers)} รายการ)")
+        teachers_to_display = filtered_teachers
+    else:
+        teachers_to_display = teachers
+
+    if teachers_to_display:
+        for teacher in teachers_to_display: # ใช้วงลูปกับข้อมูลที่กรองแล้ว
             col_left, col_right = st.columns([2, 1])
             with col_left:
                 st.subheader(f"{teacher['full_name']} (ID: {teacher['id']})")
@@ -318,10 +339,9 @@ if st.session_state.current_view == 'list':
                 st.markdown(f"**เบอร์ติดต่อ:** {teacher['contact_number'] or '-'}")
             with col_right:
                 if teacher['photo_path']:
-                    # แก้ไขชื่อตัวแปรตรงนี้ จาก photo_full_path เป็น photo_path_full
                     photo_path_full = os.path.join(UPLOAD_FOLDER, teacher['photo_path'])
-                    if os.path.exists(photo_path_full): # <-- แก้ไขตรงนี้
-                        st.image(photo_path_full, caption=f"รูป {teacher['full_name']}", width=150) # <-- และตรงนี้
+                    if os.path.exists(photo_path_full):
+                        st.image(photo_path_full, caption=f"รูป {teacher['full_name']}", width=150)
                     else:
                         st.warning("ไม่พบไฟล์รูปภาพ")
                 else:
@@ -348,7 +368,7 @@ if st.session_state.current_view == 'list':
             st.markdown("---")
 
     else:
-        st.info("ไม่พบข้อมูลครูในระบบ")
+        st.info("ไม่พบข้อมูลครูในระบบ หรือไม่พบผลการค้นหา")
 
 elif st.session_state.current_view == 'add':
     st.header("เพิ่มข้อมูลครูใหม่")
