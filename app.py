@@ -2,41 +2,42 @@ import streamlit as st
 import sqlite3
 import os
 import shutil
+from PIL import Image # นำเข้า Pillow เพื่อจัดการรูปภาพ
 
-# --- Configuration ---
+# --- Configuration (ตั้งค่าพื้นฐาน) ---
 DATABASE_NAME = 'teacher_management.db'
 PHOTO_DIR = 'teacher_photos'
-UPLOAD_FOLDER = PHOTO_DIR # Streamlit will run from the app's root dir
+UPLOAD_FOLDER = PHOTO_DIR # โฟลเดอร์สำหรับเก็บรูปภาพที่ผู้ใช้อัปโหลด
 
-# --- Database Setup and Functions ---
+# --- Database Setup and Functions (ฟังก์ชันจัดการฐานข้อมูล) ---
+
 def get_db_connection():
     """
-    Attempts to get a Streamlit SQL connection if configured via st.secrets.
-    Falls back to a direct sqlite3.connect for local development or if not configured.
+    พยายามเชื่อมต่อฐานข้อมูลโดยใช้ st.connection สำหรับ Streamlit Cloud หากมีการตั้งค่าไว้
+    หากไม่สามารถเชื่อมต่อได้ (เช่น รันในเครื่อง local หรือไม่ได้ตั้งค่าบน Cloud)
+    จะ fallback ไปใช้ sqlite3.connect โดยตรง
     """
     try:
-        # Check if st.secrets is available and has connection info for 'teacher_db'
-        # This is the most reliable way to check if st.connection is configured for deployment.
+        # ตรวจสอบว่ามี secret สำหรับ connection ชื่อ 'teacher_db' หรือไม่
         if "connections" in st.secrets and "teacher_db" in st.secrets["connections"]:
             return st.connection('teacher_db', type='sql')
     except Exception:
-        # Pass silently if st.secrets or connection fails, will fall back to sqlite3.connect
+        # หากเกิดข้อผิดพลาดในการใช้ st.connection (เช่น ไม่ได้กำหนดใน secrets) ให้ดำเนินการต่อ
         pass
 
-    # Fallback for local development or if st.connection is not configured on Streamlit Cloud
+    # Fallback: เชื่อมต่อฐานข้อมูล SQLite โดยตรง (เหมาะสำหรับการรัน local)
     conn = sqlite3.connect(DATABASE_NAME)
-    conn.row_factory = sqlite3.Row # Allows accessing columns by name
+    conn.row_factory = sqlite3.Row # ทำให้สามารถเรียกข้อมูลด้วยชื่อคอลัมน์ได้
     return conn
 
 def setup_database():
     """
-    Sets up the teachers table in the database and ensures the photo upload directory exists.
-    Handles both Streamlit connection and direct sqlite3 connection.
+    ตั้งค่าตาราง 'teachers' ในฐานข้อมูลหากยังไม่มี และสร้างโฟลเดอร์สำหรับเก็บรูปภาพ.
+    รองรับทั้งการเชื่อมต่อผ่าน Streamlit และ sqlite3 โดยตรง
     """
     conn = get_db_connection()
     
-    # Check if 'conn' has a '.session' attribute (typical for st.connection objects)
-    # This is a safer way to differentiate than checking internal _connections attribute.
+    # ตรวจสอบว่าวัตถุ 'conn' มี attribute 'session' หรือไม่ (บ่งชี้ว่าเป็น Streamlit Connection object)
     if hasattr(conn, 'session'):
         with conn.session as s:
             s.execute('''
@@ -51,8 +52,8 @@ def setup_database():
                 )
             ''')
             s.commit()
-        # No need to close conn if it's a st.connection object, as Streamlit manages it
-    else: # This is a direct sqlite3.connect object
+        # ไม่จำเป็นต้องปิดการเชื่อมต่อหากเป็น Streamlit Connection object เนื่องจาก Streamlit จัดการให้
+    else: # เป็นการเชื่อมต่อ sqlite3 โดยตรง
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS teachers (
@@ -66,67 +67,63 @@ def setup_database():
             )
         ''')
         conn.commit()
-        conn.close() # Close direct connection after setup
+        conn.close() # ปิดการเชื่อมต่อโดยตรงหลังจากตั้งค่าเสร็จ
 
-    # Create photo directory if it doesn't exist
+    # สร้างโฟลเดอร์สำหรับเก็บรูปภาพ หากยังไม่มี
     if not os.path.exists(UPLOAD_FOLDER):
         os.makedirs(UPLOAD_FOLDER)
-        # st.info(f"Created upload directory: {UPLOAD_FOLDER}") # Can be commented out for production
-    
-# Use st.cache_data to cache results from database queries for performance
-@st.cache_data(ttl=3600) # Cache for 1 hour to prevent excessive database reads
+        # st.info(f"Created upload directory: {UPLOAD_FOLDER}") # สามารถคอมเมนต์ออกได้เมื่อใช้งานจริง
+
+# ใช้ st.cache_data เพื่อ cache ผลลัพธ์จากการดึงข้อมูลจากฐานข้อมูลเพื่อประสิทธิภาพ
+@st.cache_data(ttl=3600) # Cache ข้อมูลเป็นเวลา 1 ชั่วโมง
 def get_all_teachers_from_db_cached():
-    """
-    Fetches all teacher records from the database. Caches results.
-    """
+    """ดึงข้อมูลครูทั้งหมดจากฐานข้อมูลและทำการแคช"""
     conn = get_db_connection()
-    if hasattr(conn, 'session'): # If it's a Streamlit SQL connection
-        df = conn.query('SELECT * FROM teachers', ttl=0) # ttl=0 means no cache on query level
-        return df.to_dict(orient='records') # Convert DataFrame to list of dicts for consistent output
-    else: # If it's a direct sqlite3 connection
+    if hasattr(conn, 'session'): # หากเป็นการเชื่อมต่อ Streamlit SQL
+        df = conn.query('SELECT * FROM teachers', ttl=0) # ttl=0 หมายถึงไม่แคชที่ระดับ query
+        return df.to_dict(orient='records') # แปลง DataFrame เป็น list ของ dicts เพื่อให้รูปแบบข้อมูลสอดคล้องกัน
+    else: # หากเป็นการเชื่อมต่อ sqlite3 โดยตรง
         cursor = conn.cursor()
         teachers = cursor.execute('SELECT * FROM teachers').fetchall()
         conn.close()
-        return [dict(t) for t in teachers] # Convert sqlite3.Row to dict
+        return [dict(t) for t in teachers] # แปลง sqlite3.Row เป็น dict
 
 def get_teacher_by_id_from_db(teacher_id):
-    """
-    Fetches a single teacher record by ID.
-    """
+    """ดึงข้อมูลครูหนึ่งคนตาม ID"""
     conn = get_db_connection()
-    if hasattr(conn, 'session'): # If it's a Streamlit SQL connection
+    if hasattr(conn, 'session'): # หากเป็นการเชื่อมต่อ Streamlit SQL
         try:
             teacher = conn.query(f'SELECT * FROM teachers WHERE id = {teacher_id}', ttl=0).iloc[0].to_dict()
             return teacher
-        except IndexError: # Handle case where no teacher is found
+        except IndexError: # จัดการกรณีที่ไม่พบครู
             return None
-    else: # If it's a direct sqlite3 connection
+    else: # หากเป็นการเชื่อมต่อ sqlite3 โดยตรง
         cursor = conn.cursor()
         teacher = cursor.execute('SELECT * FROM teachers WHERE id = ?', (teacher_id,)).fetchone()
         conn.close()
         return dict(teacher) if teacher else None
 
 def add_teacher_to_db(full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_file=None):
-    """
-    Adds a new teacher record to the database, including saving photo file if provided.
-    """
+    """เพิ่มข้อมูลครูใหม่ลงในฐานข้อมูล รวมถึงบันทึกไฟล์รูปภาพหากมี"""
     conn = get_db_connection()
     saved_photo_path = None
     if photo_file:
         try:
             extension = os.path.splitext(photo_file.name)[1]
+            # สร้างชื่อไฟล์ที่ไม่ซ้ำกันเพื่อหลีกเลี่ยงการเขียนทับ
             new_filename = f"{os.path.splitext(photo_file.name)[0]}_{os.urandom(8).hex()}{extension}"
             saved_photo_path_full = os.path.join(UPLOAD_FOLDER, new_filename)
             
+            # บันทึกไฟล์ที่อัปโหลด
             with open(saved_photo_path_full, "wb") as f:
                 f.write(photo_file.getbuffer())
-            saved_photo_path = new_filename # Store only filename relative to PHOTO_DIR
+            saved_photo_path = new_filename # เก็บเฉพาะชื่อไฟล์ที่สัมพันธ์กับ PHOTO_DIR
             st.toast(f"บันทึกรูปภาพ: {saved_photo_path_full}", icon="📸")
         except Exception as e:
             st.error(f"เกิดข้อผิดพลาดในการบันทึกรูปภาพ: {e}")
             saved_photo_path = None
 
-    if hasattr(conn, 'session'): # If it's a Streamlit SQL connection
+    if hasattr(conn, 'session'): # หากเป็นการเชื่อมต่อ Streamlit SQL
         with conn.session as s:
             s.execute('''
                 INSERT INTO teachers (full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_path)
@@ -140,7 +137,7 @@ def add_teacher_to_db(full_name, school_affiliation, major_subject, teaching_sub
                 photo_path=saved_photo_path
             ))
             s.commit()
-    else: # If it's a direct sqlite3 connection
+    else: # หากเป็นการเชื่อมต่อ sqlite3 โดยตรง
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO teachers (full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_path)
@@ -148,16 +145,16 @@ def add_teacher_to_db(full_name, school_affiliation, major_subject, teaching_sub
         ''', (full_name, school_affiliation, major_subject, teaching_subjects, contact_number, saved_photo_path))
         conn.commit()
         conn.close()
-    st.cache_data.clear() # Clear cache after data modification to ensure fresh data on next fetch
+    st.cache_data.clear() # ล้างแคชหลังจากแก้ไขข้อมูล เพื่อให้มั่นใจว่าข้อมูลสดใหม่ในการดึงครั้งต่อไป
     st.success(f"เพิ่มข้อมูลครู '{full_name}' สำเร็จ!")
 
 def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_file=None):
     """
-    Updates an existing teacher record in the database.
-    Handles photo updates (add new, replace old, or clear).
+    อัปเดตข้อมูลครูที่มีอยู่แล้วในฐานข้อมูล.
+    จัดการกับการอัปเดตรูปภาพ (เพิ่มใหม่, แทนที่ของเก่า, หรือล้างรูปภาพ).
     """
     conn = get_db_connection()
-    current_teacher = get_teacher_by_id_from_db(teacher_id) # Get current data for comparison and old photo path
+    current_teacher = get_teacher_by_id_from_db(teacher_id) # ดึงข้อมูลปัจจุบันเพื่อเปรียบเทียบและหา path รูปเก่า
 
     if not current_teacher:
         st.error("ไม่พบครูที่ต้องการแก้ไข")
@@ -166,7 +163,7 @@ def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subjec
     updates = []
     params = {}
 
-    # Only add to updates if the value has actually changed
+    # เพิ่มข้อมูลลงใน updates เฉพาะเมื่อค่ามีการเปลี่ยนแปลงเท่านั้น
     if full_name is not None and full_name != current_teacher['full_name']:
         updates.append("full_name = :full_name")
         params['full_name'] = full_name
@@ -183,9 +180,9 @@ def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subjec
         updates.append("contact_number = :contact_number")
         params['contact_number'] = contact_number
     
-    # Handle photo updates
-    if photo_file: # A new file was uploaded
-        if current_teacher and current_teacher['photo_path']: # Delete old photo if it exists
+    # จัดการการอัปเดตรูปภาพ
+    if photo_file: # มีไฟล์ใหม่ถูกอัปโหลด
+        if current_teacher and current_teacher['photo_path']: # ลบรูปภาพเก่าหากมี
             old_photo_full_path = os.path.join(UPLOAD_FOLDER, current_teacher['photo_path'])
             if os.path.exists(old_photo_full_path):
                 try:
@@ -199,15 +196,15 @@ def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subjec
             saved_photo_path_full = os.path.join(UPLOAD_FOLDER, new_filename)
             with open(saved_photo_path_full, "wb") as f:
                 f.write(photo_file.getbuffer())
-            saved_photo_path = new_filename # Store only filename relative to PHOTO_DIR
+            saved_photo_path = new_filename # เก็บเฉพาะชื่อไฟล์ที่สัมพันธ์กับ PHOTO_DIR
             updates.append("photo_path = :photo_path")
             params['photo_path'] = saved_photo_path
             st.toast(f"บันทึกรูปภาพใหม่: {saved_photo_path_full}", icon="📸")
         except Exception as e:
             st.error(f"เกิดข้อผิดพลาดในการบันทึกรูปภาพใหม่: {e}")
             
-    elif st.session_state.get('photo_cleared', False): # User explicitly checked "ลบรูปภาพปัจจุบัน"
-        if current_teacher and current_teacher['photo_path']: # Delete current photo file
+    elif st.session_state.get('photo_cleared', False): # ผู้ใช้เลือก "ลบรูปภาพปัจจุบัน"
+        if current_teacher and current_teacher['photo_path']: # ลบไฟล์รูปภาพปัจจุบัน
             old_photo_full_path = os.path.join(UPLOAD_FOLDER, current_teacher['photo_path'])
             if os.path.exists(old_photo_full_path):
                 try:
@@ -216,53 +213,50 @@ def update_teacher_in_db(teacher_id, full_name, school_affiliation, major_subjec
                 except Exception as e:
                     st.warning(f"เกิดข้อผิดพลาดในการลบรูปภาพ (ตามคำสั่ง): {e}")
         updates.append("photo_path = :photo_path")
-        params['photo_path'] = None # Set to NULL in DB
+        params['photo_path'] = None # ตั้งค่าเป็น NULL ใน DB
 
-    if not updates:
+    if not updates: # หากไม่มีข้อมูลที่เปลี่ยนแปลงเลย
         st.info("ไม่มีข้อมูลที่เปลี่ยนแปลง")
         return False
 
     params['id'] = teacher_id
     query = f"UPDATE teachers SET {', '.join(updates)} WHERE id = :id"
     
-    if hasattr(conn, 'session'): # If it's a Streamlit SQL connection
+    if hasattr(conn, 'session'): # หากเป็นการเชื่อมต่อ Streamlit SQL
         with conn.session as s:
             s.execute(query, params=params)
             s.commit()
-    else: # If it's a direct sqlite3 connection (less robust for dynamic updates)
+    else: # หากเป็นการเชื่อมต่อ sqlite3 โดยตรง (ไม่ค่อยแข็งแรงสำหรับการอัปเดตแบบไดนามิก)
         cursor = conn.cursor()
-        # For direct sqlite3, you need to ensure parameters are ordered correctly or use string formatting (less safe)
-        # Given the dynamic nature of 'updates' and 'params', this fallback is not fully robust for sqlite3 direct.
-        # It's highly recommended to use st.connection for database operations in Streamlit.
+        # สำหรับ sqlite3 โดยตรง การจัดการพารามิเตอร์แบบไดนามิกจะซับซ้อน
+        # ขอแนะนำให้ใช้ st.connection สำหรับการทำงานฐานข้อมูลใน Streamlit
         st.error("การอัปเดตข้อมูลผ่าน SQLite โดยตรงไม่รองรับการอัปเดตแบบไดนามิกหลายฟิลด์อย่างสมบูรณ์ด้วยวิธีการนี้")
-        conn.close() # Close direct connection
+        conn.close() # ปิดการเชื่อมต่อโดยตรง
         return False
-    st.cache_data.clear() # Clear cache after data modification
+    st.cache_data.clear() # ล้างแคชหลังจากแก้ไขข้อมูล
     st.success(f"ข้อมูลครู ID {teacher_id} อัปเดตสำเร็จ!")
     return True
 
 def delete_teacher_from_db(teacher_id):
-    """
-    Deletes a teacher record and associated photo file from the database and disk.
-    """
+    """ลบข้อมูลครูและไฟล์รูปภาพที่เกี่ยวข้องออกจากฐานข้อมูลและดิสก์"""
     conn = get_db_connection()
-    teacher_to_delete = get_teacher_by_id_from_db(teacher_id) # Get info before deleting for photo path
+    teacher_to_delete = get_teacher_by_id_from_db(teacher_id) # ดึงข้อมูลเพื่อหา path รูปภาพ
 
     if not teacher_to_delete:
         st.error(f"ไม่พบครู ID {teacher_id} ที่ต้องการลบ")
         return False
 
-    if hasattr(conn, 'session'): # If it's a Streamlit SQL connection
+    if hasattr(conn, 'session'): # หากเป็นการเชื่อมต่อ Streamlit SQL
         with conn.session as s:
             s.execute('DELETE FROM teachers WHERE id = :id', params=dict(id=teacher_id))
             s.commit()
-    else: # If it's a direct sqlite3 connection
+    else: # หากเป็นการเชื่อมต่อ sqlite3 โดยตรง
         cursor = conn.cursor()
         cursor.execute('DELETE FROM teachers WHERE id = ?', (teacher_id,))
         conn.commit()
         conn.close()
 
-    if teacher_to_delete and teacher_to_delete['photo_path']: # Delete the photo file if it exists
+    if teacher_to_delete and teacher_to_delete['photo_path']: # ลบไฟล์รูปภาพหากมี
         photo_full_path = os.path.join(UPLOAD_FOLDER, teacher_to_delete['photo_path'])
         if os.path.exists(photo_full_path):
             try:
@@ -270,50 +264,70 @@ def delete_teacher_from_db(teacher_id):
                 st.info(f"ลบรูปภาพ: {photo_full_path}")
             except Exception as e:
                 st.warning(f"เกิดข้อผิดพลาดในการลบไฟล์รูปภาพ: {e}")
-    st.cache_data.clear() # Clear cache after data modification
+    st.cache_data.clear() # ล้างแคชหลังจากแก้ไขข้อมูล
     st.success(f"ข้อมูลครู ID {teacher_id} ถูกลบสำเร็จ!")
     return True
 
-# --- Streamlit App UI ---
-st.set_page_config(layout="wide", page_title="ระบบจัดการฐานข้อมูลครู")
+# --- Streamlit App UI (ส่วนประกอบ UI ของแอปพลิเคชัน) ---
 
-st.title("👨‍🏫 ระบบจัดการฐานข้อมูลครู")
+# กำหนดการตั้งค่าหน้าเว็บ: layout, ชื่อแท็บ, และไอคอนแท็บ
+st.set_page_config(
+    layout="wide", # ทำให้หน้าเว็บขยายเต็มความกว้าง
+    page_title="ระบบจัดการฐานข้อมูลครูกลุ่มโรงเรียนบ้านด่าน 2", # ชื่อที่แสดงบนแท็บเบราว์เซอร์
+    page_icon="🏫"  # ใช้อีโมจิเป็นไอคอนแท็บ (สามารถเปลี่ยนเป็น URL ของรูปภาพได้หากต้องการ)
+)
 
-# Initialize session state for navigation and current teacher ID
+st.title("👨‍🏫 ระบบจัดการฐานข้อมูลครูกลุ่มโรงเรียนบ้านด่าน 2")
+
+# --- เพิ่ม Logo ของกลุ่มโรงเรียน ---
+logo_path = "ban_dan_2_logo.png"  # **เปลี่ยน path นี้เป็น path ที่ถูกต้องของไฟล์โลโก้ของคุณ**
+                                 # (เช่น 'images/ban_dan_2_logo.png' ถ้าเก็บในโฟลเดอร์ images)
+if os.path.exists(logo_path):
+    try:
+        logo = Image.open(logo_path)
+        st.image(logo, width=150) # ปรับขนาด logo ตามต้องการ
+    except Exception as e:
+        st.error(f"เกิดข้อผิดพลาดในการโหลดโลโก้: {e}")
+else:
+    st.warning(f"ไม่พบไฟล์โลโก้ที่: {logo_path}")
+
+st.markdown("---") # เส้นคั่นแนวนอน
+
+# กำหนดสถานะเริ่มต้นของ Session สำหรับการนำทางและ ID ครูที่กำลังแก้ไข
 if 'current_view' not in st.session_state:
-    st.session_state.current_view = 'list' # 'list', 'add', 'edit'
+    st.session_state.current_view = 'list' # มุมมองเริ่มต้น: 'list', 'add', 'edit'
 if 'edit_teacher_id' not in st.session_state:
     st.session_state.edit_teacher_id = None
-if 'photo_cleared' not in st.session_state: # To track if user wants to clear photo during edit
+if 'photo_cleared' not in st.session_state: # สถานะสำหรับติดตามว่าผู้ใช้ต้องการล้างรูปภาพหรือไม่
     st.session_state.photo_cleared = False
 
-# Setup database and photo directory at startup
+# ตั้งค่าฐานข้อมูลและโฟลเดอร์รูปภาพเมื่อเริ่มต้นแอป
 setup_database()
 
-# --- Navigation Buttons ---
-col1, col2, _ = st.columns([1,1,4]) # Use _ for the third column to discard it
+# --- Navigation Buttons (ปุ่มนำทาง) ---
+col1, col2, _ = st.columns([1,1,4]) # แบ่งคอลัมน์เพื่อจัดวางปุ่ม (ใช้ _ สำหรับคอลัมน์ที่ไม่ได้ใช้งาน)
 with col1:
     if st.button("แสดงข้อมูลครูทั้งหมด", key="show_all", use_container_width=True):
         st.session_state.current_view = 'list'
         st.session_state.edit_teacher_id = None
         st.session_state.photo_cleared = False
-        st.rerun() # Rerun to switch view immediately
+        st.rerun() # รันแอปใหม่เพื่อเปลี่ยนมุมมองทันที
 with col2:
     if st.button("เพิ่มข้อมูลครูใหม่", key="add_new", use_container_width=True):
         st.session_state.current_view = 'add'
         st.session_state.edit_teacher_id = None
         st.session_state.photo_cleared = False
-        st.rerun() # Rerun to switch view immediately
+        st.rerun() # รันแอปใหม่เพื่อเปลี่ยนมุมมองทันที
 
-st.markdown("---") # Horizontal line for separation
+st.markdown("---") # เส้นคั่นแนวนอน
 
-# --- Content Area based on current_view ---
+# --- Content Area (ส่วนเนื้อหาตามมุมมองปัจจุบัน) ---
 if st.session_state.current_view == 'list':
     st.header("รายการข้อมูลครู")
     teachers = get_all_teachers_from_db_cached()
 
     if teachers:
-        # Display teachers using columns for better layout than st.dataframe for individual records
+        # แสดงข้อมูลครูโดยใช้คอลัมน์เพื่อการจัดวางที่ดีขึ้นสำหรับแต่ละรายการ
         for teacher in teachers:
             col_left, col_right = st.columns([2, 1])
             with col_left:
@@ -325,14 +339,14 @@ if st.session_state.current_view == 'list':
             with col_right:
                 if teacher['photo_path']:
                     photo_path_full = os.path.join(UPLOAD_FOLDER, teacher['photo_path'])
-                    if os.path.exists(photo_path_full): # Check if file actually exists on disk
+                    if os.path.exists(photo_path_full): # ตรวจสอบว่าไฟล์รูปภาพมีอยู่จริงบนดิสก์
                         st.image(photo_path_full, caption=f"รูป {teacher['full_name']}", width=150)
                     else:
-                        st.warning("ไม่พบไฟล์รูปภาพ") # Warn if path exists in DB but file doesn't
+                        st.warning("ไม่พบไฟล์รูปภาพ") # แจ้งเตือนหาก path มีใน DB แต่ไฟล์ไม่มี
                 else:
                     st.info("ไม่มีรูปภาพ")
                 
-                # Action buttons for each teacher, using unique keys
+                # ปุ่มดำเนินการสำหรับครูแต่ละคน โดยใช้ key ที่ไม่ซ้ำกัน
                 edit_button = st.button(f"แก้ไข ID {teacher['id']}", key=f"edit_teacher_{teacher['id']}", use_container_width=True)
                 delete_button = st.button(f"ลบ ID {teacher['id']}", key=f"delete_teacher_{teacher['id']}", use_container_width=True)
                 
@@ -342,17 +356,17 @@ if st.session_state.current_view == 'list':
                     st.rerun()
                 
                 if delete_button:
-                    # Implement a simple confirmation dialog using session state
+                    # ใช้ session state เพื่อสร้างการยืนยันแบบง่ายๆ
                     if st.session_state.get(f'confirm_delete_{teacher["id"]}', False):
-                        delete_teacher_from_db(teacher['id'])
-                        st.session_state.current_view = 'list'
-                        del st.session_state[f'confirm_delete_{teacher["id"]}'] # Clear confirmation state
+                        if delete_teacher_from_db(teacher['id']):
+                            st.session_state.current_view = 'list'
+                        del st.session_state[f'confirm_delete_{teacher["id"]}'] # ล้างสถานะการยืนยัน
                         st.rerun()
                     else:
                         st.session_state[f'confirm_delete_{teacher["id"]}'] = True
                         st.warning(f"คลิก 'ลบ ID {teacher['id']}' อีกครั้งเพื่อยืนยันการลบ '{teacher['full_name']}'")
 
-            st.markdown("---") # Separator for each teacher record
+            st.markdown("---") # เส้นคั่นสำหรับแต่ละรายการครู
 
     else:
         st.info("ไม่พบข้อมูลครูในระบบ")
@@ -371,7 +385,7 @@ elif st.session_state.current_view == 'add':
         if submitted:
             if full_name:
                 add_teacher_to_db(full_name, school_affiliation, major_subject, teaching_subjects, contact_number, photo_file)
-                st.session_state.current_view = 'list' # After successful add, switch back to list view
+                st.session_state.current_view = 'list' # หลังจากเพิ่มสำเร็จ กลับไปที่มุมมองรายการ
                 st.rerun()
             else:
                 st.error("ชื่อ-สกุล ต้องไม่ว่างเปล่า!")
@@ -383,14 +397,14 @@ elif st.session_state.current_view == 'edit':
         if teacher_data:
             st.header(f"แก้ไขข้อมูลครู: {teacher_data['full_name']}")
             with st.form("edit_teacher_form"):
-                # Use current data as default value for text inputs
+                # ใช้ข้อมูลปัจจุบันเป็นค่าเริ่มต้นสำหรับ input text
                 new_full_name = st.text_input("ชื่อ-สกุล:", value=teacher_data['full_name'], key="edit_full_name")
                 new_school_affiliation = st.text_input("สังกัดโรงเรียน:", value=teacher_data['school_affiliation'] or "", key="edit_school_affiliation")
                 new_major_subject = st.text_input("วิชาเอก:", value=teacher_data['major_subject'] or "", key="edit_major_subject")
                 new_teaching_subjects = st.text_input("สอนรายวิชา (คั่นด้วยคอมม่า):", value=teacher_data['teaching_subjects'] or "", key="edit_teaching_subjects")
                 new_contact_number = st.text_input("เบอร์ติดต่อ:", value=teacher_data['contact_number'] or "", key="edit_contact_number")
 
-                # Display current photo if exists
+                # แสดงรูปภาพปัจจุบันหากมี
                 if teacher_data['photo_path']:
                     photo_path_full = os.path.join(UPLOAD_FOLDER, teacher_data['photo_path'])
                     if os.path.exists(photo_path_full):
@@ -402,21 +416,21 @@ elif st.session_state.current_view == 'edit':
 
                 new_photo_file = st.file_uploader("เปลี่ยนรูปถ่ายใบหน้า (เลือกไฟล์ใหม่):", type=["png", "jpg", "jpeg"], key="edit_photo_uploader")
                 
-                # Checkbox to clear photo. Reset photo_cleared state when form is re-rendered if not explicitly checked.
-                clear_photo = st.checkbox("ลบรูปภาพปัจจุบัน", value=st.session_state.photo_cleared, key="clear_current_photo")
-                st.session_state.photo_cleared = clear_photo # Update session state based on checkbox value
+                # Checkbox สำหรับล้างรูปภาพ. รีเซ็ตสถานะ photo_cleared เมื่อฟอร์มถูกเรนเดอร์ใหม่หากไม่ได้เลือกไว้อย่างชัดเจน
+                clear_photo = st.checkbox("ลบรูปภาพปัจจุบัน", value=st.session_state.get('photo_cleared', False), key="clear_current_photo")
+                st.session_state.photo_cleared = clear_photo # อัปเดต session state ตามค่าของ checkbox
 
                 submitted = st.form_submit_button("บันทึกการแก้ไข")
                 if submitted:
                     if not new_full_name:
                         st.error("ชื่อ-สกุล ต้องไม่ว่างเปล่า!")
                     else:
-                        # Decide which photo action to take
-                        photo_to_save = new_photo_file # Default: use newly uploaded file
+                        # กำหนดว่าการดำเนินการกับรูปภาพจะเป็นอย่างไร
+                        photo_to_save = new_photo_file # ค่าเริ่มต้น: ใช้ไฟล์ที่อัปโหลดใหม่
                         if st.session_state.photo_cleared:
-                            photo_to_save = None # Signal to remove photo if checkbox is checked
+                            photo_to_save = None # สัญญาณให้ลบรูปภาพหาก checkbox ถูกเลือก
 
-                        if update_teacher_in_db(
+                        if update_teacher_in_db( # เรียกฟังก์ชันอัปเดตข้อมูล
                             teacher_id_to_edit,
                             new_full_name,
                             new_school_affiliation,
@@ -427,9 +441,9 @@ elif st.session_state.current_view == 'edit':
                         ):
                             st.session_state.current_view = 'list'
                             st.session_state.edit_teacher_id = None
-                            st.session_state.photo_cleared = False # Reset state after update
+                            st.session_state.photo_cleared = False # รีเซ็ตสถานะหลังจากอัปเดต
                             st.rerun()
         else:
             st.error("ไม่พบข้อมูลครูที่ต้องการแก้ไข")
-            st.session_state.current_view = 'list' # Redirect to list view
+            st.session_state.current_view = 'list' # เปลี่ยนไปที่มุมมองรายการ
             st.rerun()
